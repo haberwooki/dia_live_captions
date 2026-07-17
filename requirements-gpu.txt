@@ -1,0 +1,12 @@
+# Optional GPU (NVIDIA CUDA 12) support for faster-whisper / CTranslate2.
+#
+# CTranslate2 bundles cuDNN 9 but NOT cuBLAS or the CUDA runtime, and on Windows
+# it won't find them on a system CUDA install either. These wheels provide the
+# missing DLLs (cublas64_12.dll, cudart64_12.dll); m0_live_captions.py preloads
+# them at startup. Skip this file on CPU-only machines — the app falls back to CPU.
+#
+#   pip install -r requirements-gpu.txt
+#
+# Pinned to the CUDA 12 series so the DLL names stay *64_12.dll (what we preload).
+nvidia-cublas-cu12>=12.4,<13
+nvidia-cuda-runtime-cu12>=12.4,<13

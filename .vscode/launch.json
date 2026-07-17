@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run M0 live captions",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\m0_live_captions.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

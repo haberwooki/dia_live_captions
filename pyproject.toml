@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "livecaptions"
+version = "0.1.0"
+description = "Cross-app live-captions overlay — local GPU transcription of Windows system audio."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "haberwooki" }]
+# 3.12 only: the diarization stack (NeMo/Streaming Sortformer, pyannote.audio)
+# is torch-based and torch has no cp313/cp314 wheels. The project was migrated
+# from 3.14 to 3.12 for exactly this reason (see ROADMAP).
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "PyAudioWPatch>=0.2.12.7",
+    "soxr>=0.5.0",
+    "numpy>=1.24",
+    "pydantic-settings>=2.2",
+    "platformdirs>=4.0",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+# NVIDIA GPU (CUDA 12) — cuBLAS for CTranslate2's GPU Whisper path. cuDNN ships
+# INSIDE the ctranslate2 wheel, so it is NOT listed here; do not add
+# nvidia-cudnn-cu12. Skip this extra entirely on CPU-only machines.
+gpu = ["nvidia-cublas-cu12>=12.4,<13", "nvidia-cuda-runtime-cu12>=12.4,<13"]
+# The always-on-top caption overlay (M2) + global hotkeys. Terminal output works without it.
+gui = ["PySide6-Essentials>=6.6"]
+# Offline "who said what" — the sherpa-onnx backend: ONNX/CPU, no HF account.
+diarize = ["sherpa-onnx>=1.10"]
+# Best-quality offline diarization (pyannote) + live speaker colours (Streaming
+# Sortformer via NeMo). Pulls in torch (CPU-only wheel on Windows) + the NeMo
+# tree. This is the ~1.7 GB feature set; the packaged installer bundles it (Tier A).
+live-diarize = ["torch>=2.4", "pyannote.audio>=4.0", "nemo-toolkit[asr]>=2.7"]
+# Opt-in LLM speaker naming (network; off by default).
+naming = ["anthropic>=0.40"]
+# Everything the packaged Windows installer bundles (Tier A).
+all = ["livecaptions[gpu,gui,diarize,live-diarize,naming]"]
+dev = ["pytest>=8.0", "pyinstaller>=6.6"]
+
+[project.urls]
+Repository = "https://github.com/haberwooki/dia_live_captions"
+
+[project.scripts]
+livecaptions = "livecaptions.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/livecaptions"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

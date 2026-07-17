@@ -1,0 +1,26 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Packaging / test artifacts
+*.egg-info/
+build/
+dist/
+Output/                       # Inno Setup installer output
+packaging/vc_redist.x64.exe   # downloaded at build time, not committed
+.pytest_cache/
+
+# Whisper model weights are cached in the HuggingFace hub cache (outside the
+# project) by default, so nothing to ignore here — but if you point the cache
+# into the project, add it below.
+
+# Local transcript outputs
+*.srt
+*.transcript.txt
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store

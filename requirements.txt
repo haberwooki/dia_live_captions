@@ -1,0 +1,9 @@
+# Core dependencies (CPU-capable on any machine).
+faster-whisper>=1.1.0
+PyAudioWPatch>=0.2.12.7
+soxr>=0.5.0
+numpy>=1.24
+
+# For NVIDIA GPU acceleration, ALSO install the CUDA 12 wheels:
+#   pip install -r requirements-gpu.txt
+# Without them the app auto-falls back to CPU (slower). See requirements-gpu.txt.

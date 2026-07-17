@@ -1,0 +1,73 @@
+name: Build Windows installer
+
+# Builds the Tier A PyInstaller bundle + Inno Setup installer on a Windows
+# runner. Pushing a version tag (e.g. `v0.1.0`) builds it and attaches the
+# .exe to that GitHub Release. `workflow_dispatch` builds it on demand and
+# leaves the .exe as a downloadable artifact (no release needed).
+#
+# NOTE ON DISK: the full torch + NeMo install (~4-5 GB) plus the build (~3 GB)
+# plus the 2.2 GB bundle is tight on the free windows-latest runner (~14 GB
+# free). The cleanup step below buys headroom; if it still fails on disk, use a
+# larger/self-hosted runner. Model weights are NOT downloaded here (they fetch
+# at the app's first run), so CI stays under the weight cost.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create/attach the release on a tag build
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Free up disk space
+        shell: pwsh
+        run: |
+          # Trim runner-image toolchains we don't use, to make room for torch/NeMo.
+          $junk = @("$env:AGENT_TOOLSDIRECTORY\Ruby", "$env:AGENT_TOOLSDIRECTORY\go",
+                    "$env:AGENT_TOOLSDIRECTORY\CodeQL", "C:\Program Files\dotnet")
+          foreach ($p in $junk) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+          Get-PSDrive C | Select-Object Used, Free
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          # Guarantee iscc.exe is on PATH for the build step.
+          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install project (full feature set + build tools)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+
+      - name: Fetch the VC++ redistributable
+        shell: pwsh
+        run: Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "packaging/vc_redist.x64.exe"
+
+      - name: Build bundle + installer
+        run: .\packaging\build.ps1
+
+      - name: Upload installer as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveCaptions-Setup
+          path: Output/LiveCaptions-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Attach installer to the release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/LiveCaptions-Setup-*.exe
+          fail_on_unmatched_files: true

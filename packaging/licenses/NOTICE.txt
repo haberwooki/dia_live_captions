@@ -1,0 +1,86 @@
+Live Captions — Third-Party Notices
+===================================
+
+Live Captions bundles third-party software. This notice lists the components
+whose licenses impose obligations on redistribution, and how this project meets
+them. Commercial distribution of the bundled installer is permitted.
+
+Where a license requires its full text to accompany the binary, that text is
+shipped alongside this file in packaging/licenses/ (see "Full-text files" at the
+end). Model WEIGHTS are downloaded on first run, not bundled — their licenses
+are covered separately in the app documentation.
+
+--------------------------------------------------------------------------------
+LGPL components (must remain replaceable + ship license text)
+--------------------------------------------------------------------------------
+PySide6 / shiboken6 — LGPL v3
+    Qt for Python. Bundled as loose, replaceable DLLs in the --onedir layout,
+    satisfying the LGPL relinking requirement (the user may substitute their own
+    build of the Qt libraries). Full text: LICENSE.LGPLv3.txt.
+    Source: https://download.qt.io/official_releases/QtForPython/
+
+soxr (python-soxr / libsoxr) — LGPL v2.1
+    Audio resampling. The one easy-to-miss LGPL obligation in this stack. Loose,
+    replaceable native library. Full text: LICENSE.LGPLv2.1.txt.
+    Source: https://github.com/dofuuz/python-soxr  and  https://sourceforge.net/projects/soxr/
+
+--------------------------------------------------------------------------------
+NVIDIA CUDA redistributables
+--------------------------------------------------------------------------------
+nvidia-cublas-cu12 (cublas64_12.dll, cublasLt64_12.dll)
+    Redistributable under the NVIDIA CUDA Toolkit EULA (the wheel's Attachment A
+    redistribution terms). The NVIDIA license text is shipped verbatim as
+    CUDA-License.txt.
+    Source: https://pypi.org/project/nvidia-cublas-cu12/
+
+Bundled INSIDE the ctranslate2 wheel (ride-along texts, easy to overlook because
+they are not separate pip packages):
+  - cuDNN dispatch shim (cudnn64_9.dll) — NVIDIA cuDNN Software License Agreement.
+    Text: cuDNN-SLA.txt.
+  - Intel OpenMP runtime (libiomp5md.dll) — Intel Simplified Software License.
+    Text: Intel-OpenMP-License.txt.
+
+--------------------------------------------------------------------------------
+Permissive components (attribution only)
+--------------------------------------------------------------------------------
+faster-whisper — MIT (https://github.com/SYSTRAN/faster-whisper)
+CTranslate2 — MIT (https://github.com/OpenNMT/CTranslate2)
+onnxruntime — MIT (https://github.com/microsoft/onnxruntime)
+PyAudioWPatch / PortAudio — MIT-style (https://github.com/s0d3s/PyAudioWPatch)
+sherpa-onnx — Apache-2.0 (https://github.com/k2-fsa/sherpa-onnx)
+NVIDIA NeMo toolkit — Apache-2.0 (https://github.com/NVIDIA/NeMo)
+pyannote.audio (code) — MIT (https://github.com/pyannote/pyannote-audio)
+    NOTE: pyannote MODELS are gated and are NOT redistributed by this installer.
+    They are downloaded by the user with their own Hugging Face token.
+PyTorch — BSD-3-Clause (https://github.com/pytorch/pytorch)
+
+Vendored code:
+  src/livecaptions/diarize/_nemo_vendor.py contains buffering helpers adapted
+  from NVIDIA NeMo (Apache-2.0). The original license header is preserved in
+  that file, satisfying the Apache-2.0 attribution requirement.
+
+--------------------------------------------------------------------------------
+Model weights (downloaded on first run, NOT bundled)
+--------------------------------------------------------------------------------
+OpenAI Whisper weights (via faster-whisper) — MIT.
+Silero VAD (bundled small .onnx inside faster-whisper) — MIT.
+sherpa-onnx diarization models:
+  - segmentation: derived from pyannote/segmentation-3.0 — MIT.
+  - speaker embedding: NVIDIA TitaNet-small — Apache-2.0.
+NVIDIA Streaming Sortformer (live speaker colours) — CC-BY-4.0. Attribution
+  required; the app credits NVIDIA. IMPORTANT: this project uses the STREAMING
+  (v2) model, which is CC-BY-4.0 and permits commercial use. Do NOT substitute
+  the offline Sortformer v1 model, which is CC-BY-NC (non-commercial).
+pyannote/speaker-diarization-community-1 — gated; user supplies their own token.
+
+--------------------------------------------------------------------------------
+Full-text files to ship in packaging/licenses/ (gather before release)
+--------------------------------------------------------------------------------
+  LICENSE.LGPLv3.txt          (PySide6/shiboken6)
+  LICENSE.LGPLv2.1.txt        (soxr)
+  CUDA-License.txt            (nvidia-cublas-cu12 EULA)
+  cuDNN-SLA.txt               (from the ctranslate2 wheel)
+  Intel-OpenMP-License.txt    (from the ctranslate2 wheel)
+The permissive (MIT/BSD/Apache) license texts may be aggregated into
+THIRD-PARTY-LICENSES.txt or left to their upstream repositories, at your
+discretion — attribution above satisfies their terms.
