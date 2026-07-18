@@ -15,13 +15,55 @@ from typing import Optional
 
 import numpy as np
 import soxr
-from faster_whisper import WhisperModel
 
 from ..events import TranscriptEvent
 from ..util import drop_oldest_put
 from .segmenter import Utterance
 
 WHISPER_SR = 16000
+
+
+class _HideModules:
+    """A meta_path finder that hides top-level modules from the import system."""
+
+    def __init__(self, names):
+        self.names = set(names)
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in self.names:
+            raise ModuleNotFoundError(f"{fullname} hidden during ctranslate2 import")
+        return None
+
+
+def _import_whisper_model():
+    """Import faster-whisper with torch/transformers hidden.
+
+    CTranslate2's __init__ imports its model-CONVERTER subpackages, which pull in
+    transformers and torch — ~3 s each, and inference never uses either. ct2 guards
+    both with try/except ImportError, so hiding them is safe and cuts
+    `import ctranslate2` from 6-13 s to ~0.5 s (measured). The block is removed
+    immediately, so live diarization (which imports torch lazily) still works.
+    """
+    blocker = _HideModules({"torch", "transformers"})
+    sys.meta_path.insert(0, blocker)
+    try:
+        from faster_whisper import WhisperModel
+    finally:
+        try:
+            sys.meta_path.remove(blocker)
+        except ValueError:
+            pass
+    return WhisperModel
+
+
+def _new_model(WhisperModel, name: str, device: str, compute: str):
+    """Prefer the already-cached model: faster-whisper otherwise makes a Hugging
+    Face round-trip on every launch to revalidate a snapshot we already have
+    (1.8-4.5 s). Falls back to the normal online path when it isn't cached yet."""
+    try:
+        return WhisperModel(name, device=device, compute_type=compute, local_files_only=True)
+    except Exception:
+        return WhisperModel(name, device=device, compute_type=compute)
 
 
 def _cuda_device_present() -> bool:
@@ -35,10 +77,11 @@ def _cuda_device_present() -> bool:
         return False
 
 
-def load_model(settings) -> WhisperModel:
+def load_model(settings):
     """Load Whisper, preferring GPU and falling back to CPU. GPU (cuBLAS)
     problems often surface only at the FIRST inference, so each candidate is
     validated with a tiny self-test before we commit to it."""
+    WhisperModel = _import_whisper_model()
     frozen = getattr(sys, "frozen", False)
     if settings.device == "cpu":
         candidates = [("cpu", settings.cpu_compute)]
@@ -61,7 +104,7 @@ def load_model(settings) -> WhisperModel:
         try:
             print(f"Loading faster-whisper '{settings.model_name}' on {device} ({compute})...")
             t0 = time.time()
-            model = WhisperModel(settings.model_name, device=device, compute_type=compute)
+            model = _new_model(WhisperModel, settings.model_name, device, compute)
             list(model.transcribe(np.zeros(WHISPER_SR, dtype=np.float32),
                                   beam_size=1, vad_filter=False)[0])
             print(f"Model ready on {device} in {time.time() - t0:.1f}s.")
