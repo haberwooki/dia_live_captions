@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     # global hotkeys (Win32 RegisterHotKey). Remap here if another app claims one.
     hotkey_toggle: str = "ctrl+alt+c"     # show/hide the overlay
     hotkey_pause: str = "ctrl+alt+p"      # pause/resume captions
+    hotkey_quit: str = "ctrl+alt+q"       # quit the app
     hotkey_left: str = "ctrl+alt+left"
     hotkey_right: str = "ctrl+alt+right"
     hotkey_up: str = "ctrl+alt+up"

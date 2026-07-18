@@ -13,9 +13,10 @@ work stays on the GUI thread.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -298,19 +299,46 @@ class OverlayWindow(QtWidgets.QWidget):
         self._qs.setValue("offset_y", self._offset.y())
 
 
-def run_overlay(source, settings, *, source_name: str, is_live: bool,
-                movable: bool = False, screenshot_path: Optional[str] = None,
-                extra_sink=None) -> None:
-    """Own the Qt event loop (main thread) and drive the overlay from `source`."""
+class _SourceBuilder(QtCore.QObject):
+    """Builds the source (which loads the Whisper model) OFF the GUI thread so the
+    overlay can appear immediately with a 'loading' status. On first run that load
+    includes a ~1.5 GB download that used to block for ~90 s with no window shown."""
+
+    ready = QtCore.Signal(object)
+    failed = QtCore.Signal(str)
+
+    def build(self, factory: Callable[[], object]) -> None:
+        def _work():
+            try:
+                source = factory()
+            except BaseException as e:   # load_model raises SystemExit on total failure
+                self.failed.emit(str(e) or e.__class__.__name__)
+                return
+            self.ready.emit(source)
+        threading.Thread(target=_work, daemon=True).start()
+
+
+def run_overlay(source_factory: Callable[[], object], settings, *, source_name: str,
+                is_live: bool, movable: bool = False,
+                screenshot_path: Optional[str] = None, extra_sink=None) -> None:
+    """Own the Qt event loop (main thread). Shows the overlay first, then builds
+    the source (model load) off-thread so there's always a visible status."""
     QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)   # the tray keeps us alive even if the overlay is hidden
 
     overlay = OverlayWindow(settings, source_name=source_name, movable=movable)
-    overlay.set_status("listening…")
+    overlay.set_status("starting…")
     overlay.show()
     if not movable:
         overlay.apply_click_through(True)   # after the native window exists
+
+    # --- system tray: the only visible way to quit, and the "it's running" signal ---
+    tray = None
+    if not screenshot_path:
+        from .tray import install_tray
+        tray = install_tray(app, overlay, on_quit=app.quit)
 
     # --- global hotkeys (the overlay is click-through, so Qt shortcuts can't work) ---
     hotkeys = None
@@ -322,6 +350,7 @@ def run_overlay(source, settings, *, source_name: str, is_live: bool,
         bound = [
             hotkeys.register(settings.hotkey_toggle, overlay.toggle_visible, "show/hide"),
             hotkeys.register(settings.hotkey_pause, overlay.toggle_paused, "pause"),
+            hotkeys.register(settings.hotkey_quit, app.quit, "quit"),
             hotkeys.register(settings.hotkey_left, lambda: overlay.nudge(-px, 0), "move left"),
             hotkeys.register(settings.hotkey_right, lambda: overlay.nudge(px, 0), "move right"),
             hotkeys.register(settings.hotkey_up, lambda: overlay.nudge(0, -px), "move up"),
@@ -329,9 +358,9 @@ def run_overlay(source, settings, *, source_name: str, is_live: bool,
         ]
         if any(bound):
             print(f"Hotkeys: {settings.hotkey_toggle} show/hide, {settings.hotkey_pause} pause, "
-                  f"ctrl+alt+arrows move")
+                  f"{settings.hotkey_quit} quit, ctrl+alt+arrows move")
 
-    # --- screenshot mode: render a canned partial+final sequence and save ---
+    # --- screenshot mode: render a canned partial+final sequence and save (no model) ---
     if screenshot_path:
         overlay._on_event(TranscriptEvent("did you get a chance to look at the results?",
                                           source="demo", t_start=0, t_end=1,
@@ -350,36 +379,50 @@ def run_overlay(source, settings, *, source_name: str, is_live: bool,
         app.exec()
         return
 
-    # --- live: start the source, marshal events onto the GUI thread ---
-    on_event = overlay.bridge.emit_event
-    if extra_sink is not None:                 # e.g. the transcript writer
-        def on_event(ev, _bridge=overlay.bridge.emit_event, _extra=extra_sink):
-            _bridge(ev)
-            _extra(ev)
-    source.start(on_event=on_event, monitor=(overlay.note_block if is_live else None))
+    holder = {"src": None}
 
-    health = QtCore.QTimer()
-    health.timeout.connect(lambda: overlay.check_audio_health(is_live))
-    health.start(300)
+    # --- runs on the GUI thread once the model is loaded and the source is built ---
+    def _start_source(source) -> None:
+        holder["src"] = source
+        overlay.set_status("listening — play some audio")
+        on_event = overlay.bridge.emit_event
+        if extra_sink is not None:                 # e.g. the transcript writer
+            def on_event(ev, _bridge=overlay.bridge.emit_event, _extra=extra_sink):
+                _bridge(ev)
+                _extra(ev)
+        source.start(on_event=on_event, monitor=(overlay.note_block if is_live else None))
 
-    # Quit when the source finishes. For a finite source (WAV/demo) hold the
-    # last captions on screen a few seconds so they're readable; a live source
-    # only "finishes" via Ctrl+C, so quit immediately then.
-    hold = {"deadline": None}
+        health = QtCore.QTimer(overlay)
+        health.timeout.connect(lambda: overlay.check_audio_health(is_live))
+        health.start(300)
 
-    def _check_done():
-        if not source.finished.is_set():
-            return
-        if is_live:
-            app.quit()
-        elif hold["deadline"] is None:
-            hold["deadline"] = time.monotonic() + 4.0
-        elif time.monotonic() >= hold["deadline"]:
-            app.quit()
+        # Quit when a finite source (WAV/demo) finishes, holding the last captions
+        # a few seconds so they're readable; a live source only ends via quit.
+        hold = {"deadline": None}
 
-    done = QtCore.QTimer()
-    done.timeout.connect(_check_done)
-    done.start(250)
+        def _check_done():
+            if not source.finished.is_set():
+                return
+            if is_live:
+                app.quit()
+            elif hold["deadline"] is None:
+                hold["deadline"] = time.monotonic() + 4.0
+            elif time.monotonic() >= hold["deadline"]:
+                app.quit()
+
+        done = QtCore.QTimer(overlay)
+        done.timeout.connect(_check_done)
+        done.start(250)
+        overlay._timers = (health, done)   # keep refs alive
+
+    def _on_failed(msg: str) -> None:
+        overlay.set_status(f"couldn't start: {msg[:90]}", warn=True)
+
+    builder = _SourceBuilder()
+    builder.ready.connect(_start_source)
+    builder.failed.connect(_on_failed)
+    overlay.set_status("loading model… (first run downloads ~1.5 GB, please wait)")
+    builder.build(source_factory)
 
     # let the interpreter process Ctrl+C while the Qt loop runs
     import signal
@@ -391,4 +434,5 @@ def run_overlay(source, settings, *, source_name: str, is_live: bool,
     app.exec()
     if hotkeys is not None:
         hotkeys.unregister_all()
-    source.stop()
+    if holder["src"] is not None:
+        holder["src"].stop()

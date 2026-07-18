@@ -90,9 +90,19 @@ for _pkg in (
     "nemo", "pyannote", "lightning", "pytorch_lightning", "lightning_fabric",
     "torchmetrics", "asteroid_filterbanks", "omegaconf", "hydra",
     "sentencepiece", "huggingface_hub", "sherpa_onnx", "onnxruntime",
-    "speechbrain", "julius",
+    "speechbrain", "julius", "hf_xet",
 ):
     _safe_collect_all(_pkg)
+
+# hf_xet accelerates Hugging Face model downloads (first-run weights). Like cuda
+# below, its compiled Rust extension (hf_xet/hf_xet.pyd) is invisible to
+# collect_all (0 binaries) — grab it explicitly, or the frozen app logs
+# "hf_xet is not installed" and falls back to slower HTTP downloads.
+if importlib.util.find_spec("hf_xet") is not None:
+    _hx = list(importlib.util.find_spec("hf_xet").submodule_search_locations)[0]
+    for _pyd in glob.glob(os.path.join(_hx, "*.pyd")):
+        binaries.append((_pyd, "hf_xet"))
+    hiddenimports.append("hf_xet")
 
 # cuda-bindings (`cuda`) — a NAMESPACE package whose compiled .pyd extensions are
 # invisible to collect_all AND collect_dynamic_libs (both return 0 binaries).

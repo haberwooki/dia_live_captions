@@ -57,15 +57,20 @@ def _run_terminal(source, settings, *, source_name: str, is_live: bool, extra_si
     print("Done.")
 
 
-def _dispatch(source, settings, args, *, source_name: str, is_live: bool, extra_sink=None) -> None:
+def _dispatch(source_factory, settings, args, *, source_name: str, is_live: bool,
+              extra_sink=None) -> None:
+    """`source_factory` is a zero-arg callable that builds the source (it loads the
+    Whisper model, which on first run downloads weights). The overlay runs it
+    off-thread so the window appears immediately with a status; the terminal path
+    builds it eagerly and prints progress to the console."""
     if getattr(args, "overlay", False) or getattr(args, "demo", False) or getattr(args, "screenshot", None):
         from .ui.overlay import run_overlay
-        run_overlay(source, settings, source_name=source_name, is_live=is_live,
+        run_overlay(source_factory, settings, source_name=source_name, is_live=is_live,
                     movable=getattr(args, "movable", False),
                     screenshot_path=getattr(args, "screenshot", None),
                     extra_sink=extra_sink)
     else:
-        _run_terminal(source, settings, source_name=source_name, is_live=is_live,
+        _run_terminal(source_factory(), settings, source_name=source_name, is_live=is_live,
                       extra_sink=extra_sink)
 
 
@@ -250,12 +255,12 @@ def run(args) -> None:
     # --- Demo / Fake sources: no audio device, no GPU. ---
     if getattr(args, "demo", False):
         print("Demo overlay (canned partials + finals, no audio/GPU).")
-        _dispatch(DemoTranscriptionSource(loop=getattr(args, "loop", False)),
+        _dispatch(lambda: DemoTranscriptionSource(loop=getattr(args, "loop", False)),
                   settings, args, source_name="demo", is_live=False)
         return
     if getattr(args, "fake", False):
         print("Fake source (canned captions, no audio/GPU).")
-        _dispatch(FakeTranscriptionSource(), settings, args, source_name="fake", is_live=False)
+        _dispatch(lambda: FakeTranscriptionSource(), settings, args, source_name="fake", is_live=False)
         return
 
     # --- Build the audio source first (fail fast on a bad file/device). ---
@@ -274,15 +279,19 @@ def run(args) -> None:
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
         audio = cls(dev, block_sec=settings.block_sec)
 
-    bootstrap_cuda_dlls()
-    model = load_model(settings)
     live_diarize = getattr(args, "diarize_live", False)
-    if getattr(args, "streaming", False) or live_diarize:
-        from .sources.streaming_local import StreamingTranscriptionSource
-        source = StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
-                                              diarize=live_diarize)
-    else:
-        source = LocalTranscriptionSource(audio, model, settings, source_id="loopback")
+    streaming = getattr(args, "streaming", False) or live_diarize
+
+    def build_source():
+        """Deferred so the overlay can show a 'loading' status while this runs
+        (the model load downloads ~1.5 GB on first run)."""
+        bootstrap_cuda_dlls()
+        model = load_model(settings)
+        if streaming:
+            from .sources.streaming_local import StreamingTranscriptionSource
+            return StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
+                                                diarize=live_diarize)
+        return LocalTranscriptionSource(audio, model, settings, source_id="loopback")
 
     if audio.is_live:
         print(f"Capturing: {audio.name}  ({audio.rate} Hz, index {getattr(audio, 'index', '?')})")
@@ -298,7 +307,7 @@ def run(args) -> None:
         writer.start()
 
     try:
-        _dispatch(source, settings, args, source_name=audio.name, is_live=audio.is_live,
+        _dispatch(build_source, settings, args, source_name=audio.name, is_live=audio.is_live,
                   extra_sink=(writer.on_event if writer else None))
     finally:
         if writer is not None:
