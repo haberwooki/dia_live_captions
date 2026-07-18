@@ -166,8 +166,27 @@ class OverlayWindow(QtWidgets.QWidget):
 
     def _speaker_color(self, speaker: Optional[str]) -> QtGui.QColor:
         if not speaker:
-            return QtGui.QColor(255, 255, 255)
+            c = QtGui.QColor(getattr(self._settings, "overlay_text_color", "#FFFFFF"))
+            return c if c.isValid() else QtGui.QColor(255, 255, 255)
         return QtGui.QColor(SPEAKER_COLORS[self._speaker_slots.get(speaker, 0) % len(SPEAKER_COLORS)])
+
+    # ---- live settings apply (called from the Settings window) ----
+    def apply_appearance(self) -> None:
+        """Re-read appearance settings (size/colour/opacity/lines) and apply now."""
+        self._font = QtGui.QFont("Segoe UI", int(self._settings.overlay_font_pt))
+        self._font.setWeight(QtGui.QFont.Weight.DemiBold)
+        self.setWindowOpacity(self._settings.overlay_opacity)
+        self._relayout()
+
+    def set_movable(self, movable: bool) -> None:
+        self._movable = movable
+        self.apply_click_through(not movable)   # movable == not click-through
+
+    def reset_position(self) -> None:
+        self._offset = QtCore.QPoint(0, 0)
+        self._qs.setValue("offset_x", 0)
+        self._qs.setValue("offset_y", 0)
+        self._relayout()
 
     def set_status(self, text: str, warn: bool = False) -> None:
         self._status = text
@@ -336,9 +355,19 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
 
     # --- system tray: the only visible way to quit, and the "it's running" signal ---
     tray = None
+    settings_win = {"w": None}
+
+    def _open_settings():
+        from .settings import SettingsWindow
+        if settings_win["w"] is None:
+            settings_win["w"] = SettingsWindow(settings, overlay)
+        settings_win["w"].show()
+        settings_win["w"].raise_()
+        settings_win["w"].activateWindow()
+
     if not screenshot_path:
         from .tray import install_tray
-        tray = install_tray(app, overlay, on_quit=app.quit)
+        tray = install_tray(app, overlay, on_quit=app.quit, on_settings=_open_settings)
 
     # --- global hotkeys (the overlay is click-through, so Qt shortcuts can't work) ---
     hotkeys = None

@@ -279,7 +279,7 @@ def run(args) -> None:
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
         audio = cls(dev, block_sec=settings.block_sec)
 
-    live_diarize = getattr(args, "diarize_live", False)
+    live_diarize = getattr(args, "diarize_live", False) or getattr(settings, "speaker_colors", False)
     streaming = getattr(args, "streaming", False) or live_diarize
 
     def build_source():

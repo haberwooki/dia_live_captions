@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     overlay_max_lines: int = 3
     overlay_opacity: float = 1.0
     overlay_width_frac: float = 0.7   # max pill width as a fraction of screen width
+    overlay_text_color: str = "#FFFFFF"   # base caption colour (speakers override when coloured)
+    speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
 
     # global hotkeys (Win32 RegisterHotKey). Remap here if another app claims one.
     hotkey_toggle: str = "ctrl+alt+c"     # show/hide the overlay
@@ -104,9 +106,9 @@ class Settings(BaseSettings):
         return tuple(sources)
 
 
-def save_device_choice(name: str, ordinal: int) -> None:
-    """Persist the chosen loopback (by name + ordinal) into the TOML config,
-    preserving any other keys already present."""
+def save_settings(**kwargs) -> None:
+    """Merge the given keys into the TOML config, preserving other keys. A value
+    of None removes the key (reverting to the field default) — TOML has no null."""
     data = {}
     if CONFIG_PATH.exists():
         try:
@@ -116,8 +118,16 @@ def save_device_choice(name: str, ordinal: int) -> None:
             data = {}
     if not isinstance(data, dict):
         data = {}
-    data["loopback_name"] = name
-    data["loopback_ordinal"] = ordinal
+    for key, value in kwargs.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump(data, f)
+
+
+def save_device_choice(name: str, ordinal: int) -> None:
+    """Persist the chosen loopback (by name + ordinal)."""
+    save_settings(loopback_name=name, loopback_ordinal=ordinal)
