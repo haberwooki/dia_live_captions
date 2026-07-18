@@ -43,7 +43,8 @@ def make_icon() -> QtGui.QIcon:
     return icon
 
 
-def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit) -> QtWidgets.QSystemTrayIcon | None:
+def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit,
+                 on_settings=None) -> QtWidgets.QSystemTrayIcon | None:
     """Add a tray icon whose menu controls the overlay. Returns it (keep a
     reference alive) or None if the platform has no system tray."""
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
@@ -60,8 +61,11 @@ def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit) -> QtWidgets.
     act_pause.triggered.connect(overlay.toggle_paused)
 
     menu.addSeparator()
-    act_settings = menu.addAction("Settings… (coming soon)")
-    act_settings.setEnabled(False)
+    act_settings = menu.addAction("Settings…")
+    if on_settings is not None:
+        act_settings.triggered.connect(on_settings)
+    else:
+        act_settings.setEnabled(False)
 
     menu.addSeparator()
     act_quit = menu.addAction("Quit Live Captions")

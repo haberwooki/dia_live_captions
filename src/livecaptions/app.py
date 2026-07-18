@@ -1,7 +1,6 @@
 """Wire config -> source -> sink (terminal or overlay) and run until finished / Ctrl+C."""
 from __future__ import annotations
 
-from .asr.whisper import load_model
 from .capture.cuda import bootstrap_cuda_dlls
 from .capture.devices import (
     enumerate_loopbacks,
@@ -14,7 +13,6 @@ from .capture.wavfile import WavFileSource
 from .config import Settings, save_device_choice
 from .sources.demo import DemoTranscriptionSource
 from .sources.fake import FakeTranscriptionSource
-from .sources.local import LocalTranscriptionSource
 from .store.db import DB_PATH
 from .ui.terminal import TerminalUI
 
@@ -76,6 +74,7 @@ def _dispatch(source_factory, settings, args, *, source_name: str, is_live: bool
 
 def _run_diarize(args, settings) -> None:
     """Offline post-processing: WAV -> speaker-labeled transcript."""
+    from .asr.whisper import load_model   # lazy: pulls faster-whisper (~20s cold)
     from .diarize.assign import format_transcript
     from .diarize.pipeline import diarize_file
 
@@ -279,12 +278,15 @@ def run(args) -> None:
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
         audio = cls(dev, block_sec=settings.block_sec)
 
-    live_diarize = getattr(args, "diarize_live", False)
+    live_diarize = getattr(args, "diarize_live", False) or getattr(settings, "speaker_colors", False)
     streaming = getattr(args, "streaming", False) or live_diarize
 
     def build_source():
-        """Deferred so the overlay can show a 'loading' status while this runs
-        (the model load downloads ~1.5 GB on first run)."""
+        """Deferred so the overlay can show a 'loading' status while this runs.
+        Imports faster-whisper here (not at module load) so importing app is fast
+        and the overlay appears before the ~20 s cold ML import, not after it."""
+        from .asr.whisper import load_model
+        from .sources.local import LocalTranscriptionSource
         bootstrap_cuda_dlls()
         model = load_model(settings)
         if streaming:
