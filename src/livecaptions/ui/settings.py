@@ -37,6 +37,11 @@ def _loopbacks() -> tuple[List[dict], Optional[int]]:
 
 
 class SettingsWindow(QtWidgets.QWidget):
+    # updater: marshal background download progress/results onto the GUI thread
+    _check_done = QtCore.Signal(object)   # {"tag", "url", "err"}
+    _dl_progress = QtCore.Signal(int)
+    _dl_done = QtCore.Signal(str)         # "" on success, else an error string
+
     def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None):
         super().__init__(None)
         self._settings = settings
@@ -53,6 +58,11 @@ class SettingsWindow(QtWidgets.QWidget):
         root.addWidget(self._appearance_group())
         root.addWidget(self._overlay_group())
         root.addWidget(self._features_group())
+        root.addWidget(self._updates_group())
+
+        self._check_done.connect(self._on_check_done)
+        self._dl_progress.connect(self._on_dl_progress)
+        self._dl_done.connect(self._on_dl_done)
 
         self._restart_note = QtWidgets.QLabel("")
         self._restart_note.setStyleSheet("color: #d08a30;")
@@ -252,6 +262,94 @@ class SettingsWindow(QtWidgets.QWidget):
     def _on_model(self, name: str) -> None:
         self._persist(model_name=name)
         self._apply_pipeline("model")
+
+    # ---- updates (upgrade the app; models/transcripts are kept) ----
+    def _updates_group(self) -> QtWidgets.QGroupBox:
+        from .. import updater
+        g = QtWidgets.QGroupBox("Updates")
+        v = QtWidgets.QVBoxLayout(g)
+        row = QtWidgets.QHBoxLayout()
+        self._ver = QtWidgets.QLabel(f"Version {updater.current_version()}")
+        row.addWidget(self._ver)
+        row.addStretch(1)
+        self._check_btn = QtWidgets.QPushButton("Check for updates")
+        self._check_btn.clicked.connect(self._check_updates)
+        row.addWidget(self._check_btn)
+        v.addLayout(row)
+        note = QtWidgets.QLabel("Updating replaces the app and keeps your models and transcripts "
+                                "(no big re-download).")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        v.addWidget(note)
+        return g
+
+    def _check_updates(self) -> None:
+        import threading
+        from .. import updater
+        self._check_btn.setEnabled(False)
+        self._ver.setText("Checking for updates…")
+
+        def _work():
+            try:
+                tag, url = updater.latest_release()
+                self._check_done.emit({"tag": tag, "url": url, "err": None})
+            except Exception as e:
+                self._check_done.emit({"tag": None, "url": None, "err": type(e).__name__})
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_check_done(self, res: dict) -> None:
+        from .. import updater
+        self._check_btn.setEnabled(True)
+        if res["err"]:
+            self._ver.setText(f"Couldn't check for updates ({res['err']})")
+            return
+        tag, url = res["tag"], res["url"]
+        if not url or not updater.is_newer(tag):
+            self._ver.setText(f"Up to date (version {updater.current_version()})")
+            return
+        ans = QtWidgets.QMessageBox.question(
+            self, "Update available",
+            f"Version {tag} is available (you have {updater.current_version()}).\n\n"
+            f"Download and install it now? Your models and transcripts are kept, and "
+            f"Live Captions will close to finish installing.")
+        if ans == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._start_download(url, tag)
+        else:
+            self._ver.setText(f"Update {tag} available")
+
+    def _start_download(self, url: str, tag: str) -> None:
+        import threading
+        from .. import updater
+        self._dlg = QtWidgets.QProgressDialog(f"Downloading {tag}…", None, 0, 100, self)
+        self._dlg.setWindowTitle("Updating Live Captions")
+        self._dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self._dlg.setAutoClose(False)
+        self._dlg.setValue(0)
+        self._dlg.show()
+        self._dl_path = None
+
+        def _work():
+            try:
+                self._dl_path = updater.download(
+                    url, on_progress=lambda f: self._dl_progress.emit(int(f * 100)))
+                self._dl_done.emit("")
+            except Exception as e:
+                self._dl_done.emit(f"{type(e).__name__}: {e}")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_dl_progress(self, pct: int) -> None:
+        if getattr(self, "_dlg", None) is not None:
+            self._dlg.setValue(pct)
+
+    def _on_dl_done(self, err: str) -> None:
+        from .. import updater
+        if getattr(self, "_dlg", None) is not None:
+            self._dlg.close()
+        if err:
+            QtWidgets.QMessageBox.warning(self, "Update failed", f"The download failed:\n{err}")
+            return
+        updater.run_installer(self._dl_path)   # silent; upgrades in place, keeps models
+        QtWidgets.QApplication.quit()           # close so the installer can replace our files
 
 
 def run_settings(settings, screenshot_path: Optional[str] = None) -> None:

@@ -3,4 +3,4 @@
 Local GPU transcription of Windows system audio. See docs/architecture.md.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.4"

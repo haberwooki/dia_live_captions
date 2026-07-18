@@ -12,7 +12,7 @@
 ;    anything outside our own %LOCALAPPDATA%\live-captions tree.
 
 #define AppName "Live Captions"
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.4"
 #define AppPublisher "live-captions"
 #define AppExeCli "livecaptions.exe"
 #define AppExeGui "livecaptions-overlay.exe"
@@ -35,6 +35,8 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0
+CloseApplications=yes
+RestartApplications=no
 OutputDir=..\Output
 OutputBaseFilename=LiveCaptions-Setup-{#AppVersion}
 Compression=lzma2/max
