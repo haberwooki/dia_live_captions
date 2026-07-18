@@ -75,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show captions in an always-on-top overlay instead of the terminal")
     ap.add_argument("--demo", action="store_true",
                     help="overlay demo: canned partials+finals, no audio/GPU (implies --overlay)")
+    ap.add_argument("--settings", action="store_true",
+                    help="open the settings window (device, size, colour, model) and exit; "
+                         "no capture")
     ap.add_argument("--movable", action="store_true",
                     help="overlay: disable click-through so you can drag it to reposition")
     ap.add_argument("--opacity", type=float, metavar="F",
@@ -93,6 +96,15 @@ def main() -> None:
     configure_runtime()
 
     args = build_parser().parse_args()
+
+    # --settings only needs the config window — route it before importing app,
+    # which pulls in the ~20 s cold faster-whisper stack it doesn't need.
+    if args.settings:
+        from .config import Settings
+        from .ui.settings import run_settings
+        run_settings(Settings(), screenshot_path=args.screenshot)
+        return
+
     from .app import run
     run(args)
 

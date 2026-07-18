@@ -7,6 +7,7 @@ and take effect on the next launch — the window says so.
 """
 from __future__ import annotations
 
+import sys
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -227,3 +228,17 @@ class SettingsWindow(QtWidgets.QWidget):
     def _on_model(self, name: str) -> None:
         self._persist(model_name=name)
         self._mark_restart()
+
+
+def run_settings(settings, screenshot_path: Optional[str] = None) -> None:
+    """Open the settings window standalone (no capture). `livecaptions --settings`.
+    Changes persist to config.toml and take effect on the next launch."""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = SettingsWindow(settings, overlay=None)
+    win.show()
+    if screenshot_path:
+        def _grab():
+            win.grab().save(screenshot_path)
+            app.quit()
+        QtCore.QTimer.singleShot(400, _grab)
+    app.exec()
