@@ -65,6 +65,7 @@ class SettingsWindow(QtWidgets.QWidget):
         self._dl_done.connect(self._on_dl_done)
 
         self._restart_note = QtWidgets.QLabel("")
+        self._restart_note.setWordWrap(True)
         self._restart_note.setStyleSheet("color: #d08a30;")
         root.addWidget(self._restart_note)
 
@@ -85,14 +86,26 @@ class SettingsWindow(QtWidgets.QWidget):
         if self._overlay is not None:
             self._overlay.apply_appearance()
 
+    def pipeline_status(self, msg: str, *, warn: bool = False) -> None:
+        """Called by the overlay when a live rebuild finishes (or fails), so the note
+        reflects what actually happened instead of expiring on a guessed timer —
+        loading the speaker model can take a while, and downloads it the first time."""
+        self._restart_note.setStyleSheet("color: #c04a3a;" if warn else "color: #3a8a4a;")
+        self._restart_note.setText(msg)
+        if not warn:
+            QtCore.QTimer.singleShot(4000, lambda: self._restart_note.setText(""))
+
     def _apply_pipeline(self, what: str) -> None:
         """A change that needs the capture/model pipeline rebuilt. Apply it live if
         there's a running pipeline to restart; otherwise say exactly what will apply
         on next launch (standalone `--settings` has nothing to restart)."""
         if self._on_restart is not None:
-            self._restart_note.setText(f"Applying {what} change — reloading…")
+            self._restart_note.setStyleSheet("color: #d08a30;")
+            self._restart_note.setText(
+                f"Applying {what} — reloading… (the first time speaker colours are "
+                f"enabled this downloads the speaker model, which can take a minute)"
+                if what == "speaker colours" else f"Applying {what} change — reloading…")
             self._on_restart()
-            QtCore.QTimer.singleShot(6000, lambda: self._restart_note.setText(""))
         else:
             self._restart_dirty = True
             self._restart_note.setText(
@@ -208,7 +221,7 @@ class SettingsWindow(QtWidgets.QWidget):
         g = QtWidgets.QGroupBox("Overlay")
         v = QtWidgets.QVBoxLayout(g)
         self._movable = QtWidgets.QCheckBox("Movable (drag to reposition; uncheck to click through)")
-        self._movable.setChecked(bool(getattr(self._overlay, "_movable", False)))
+        self._movable.setChecked(bool(getattr(self._settings, "overlay_movable", False)))
         self._movable.toggled.connect(self._on_movable)
         v.addWidget(self._movable)
         reset = QtWidgets.QPushButton("Reset position to bottom-centre")
@@ -222,6 +235,7 @@ class SettingsWindow(QtWidgets.QWidget):
         return g
 
     def _on_movable(self, on: bool) -> None:
+        self._persist(overlay_movable=on)
         if self._overlay is not None:
             self._overlay.set_movable(on)
 

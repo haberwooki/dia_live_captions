@@ -12,7 +12,7 @@
 ;    anything outside our own %LOCALAPPDATA%\live-captions tree.
 
 #define AppName "Live Captions"
-#define AppVersion "0.1.5"
+#define AppVersion "0.1.6"
 #define AppPublisher "live-captions"
 #define AppExeCli "livecaptions.exe"
 #define AppExeGui "livecaptions-overlay.exe"
@@ -72,10 +72,18 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeGui}"; Tasks: desktop
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ runtime..."; Flags: waituntilterminated
 Filename: "{app}\{#AppExeGui}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+; The in-app updater installs silently and passes /RELAUNCH=1 so the app comes
+; back up on its own. A plain silent install (winget, scripted) must NOT launch.
+Filename: "{app}\{#AppExeGui}"; Flags: nowait; Check: ShouldRelaunch
 
 [Code]
 const
   EnvKey = 'Environment';
+
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
 
 { ---- PATH add/remove (HKCU): careful string surgery, never clobber the user's PATH ---- }
 function PathList: string;

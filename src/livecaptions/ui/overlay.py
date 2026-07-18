@@ -347,6 +347,8 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # the tray keeps us alive even if the overlay is hidden
 
+    # The saved preference wins unless --movable forced it on for this run.
+    movable = bool(movable or getattr(settings, "overlay_movable", False))
     overlay = OverlayWindow(settings, source_name=source_name, movable=movable)
     overlay.set_status("starting…")
     overlay.show()
@@ -411,7 +413,13 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
         app.exec()
         return
 
-    holder = {"src": None}
+    holder = {"src": None, "restarting": False}
+
+    def _tell_settings(msg: str, warn: bool = False) -> None:
+        """Report a live-rebuild outcome into the Settings window, if it's open."""
+        w = settings_win.get("w")
+        if w is not None and w.isVisible():
+            w.pipeline_status(msg, warn=warn)
 
     # --- runs on the GUI thread once the model is loaded and the source is built ---
     def _start_source(source) -> None:
@@ -419,6 +427,9 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
             t.stop()
         holder["src"] = source
         overlay.set_status("listening — play some audio")
+        if holder["restarting"]:
+            holder["restarting"] = False
+            _tell_settings("✓ Applied — captions are running again.")
         on_event = overlay.bridge.emit_event
         if extra_sink is not None:                 # e.g. the transcript writer
             def on_event(ev, _bridge=overlay.bridge.emit_event, _extra=extra_sink):
@@ -435,6 +446,8 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
         hold = {"deadline": None}
 
         def _check_done():
+            if holder["src"] is not source:
+                return          # superseded by a live restart — its "finished" is not ours to act on
             if not source.finished.is_set():
                 return
             if is_live:
@@ -451,6 +464,10 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
 
     def _on_failed(msg: str) -> None:
         overlay.set_status(f"couldn't start: {msg[:90]}", warn=True)
+        if holder["restarting"]:
+            holder["restarting"] = False
+            _tell_settings(f"Couldn't apply that change: {msg[:200]}\n"
+                           "Captions are stopped — undo it to start again.", warn=True)
 
     builder = _SourceBuilder()
     builder.ready.connect(_start_source)
@@ -461,9 +478,16 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     def _restart_pipeline() -> None:
         """Apply a device/model/speaker change without quitting: stop the current
         source and rebuild it from the now-updated settings, off the GUI thread."""
+        # Stop the old timers FIRST. Stopping a source sets its `finished` event,
+        # and the still-running done-timer would see that on a live source and
+        # quit the whole app mid-restart.
+        for t in getattr(overlay, "_timers", ()):
+            t.stop()
+        overlay._timers = ()
         overlay.set_status("applying settings — reloading…")
         old = holder["src"]
         holder["src"] = None
+        holder["restarting"] = True
 
         def _work():
             if old is not None:

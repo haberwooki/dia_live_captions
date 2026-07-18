@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     overlay_text_color: str = "#FFFFFF"   # base caption colour (speakers override when coloured)
     speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
     open_settings_on_launch: bool = True  # show the Settings window when the app starts
+    overlay_movable: bool = False         # draggable (vs click-through); remembered across launches
 
     # global hotkeys (Win32 RegisterHotKey). Remap here if another app claims one.
     hotkey_toggle: str = "ctrl+alt+c"     # show/hide the overlay

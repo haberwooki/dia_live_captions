@@ -71,5 +71,8 @@ def download(url: str, on_progress: Optional[Callable[[float], None]] = None,
 def run_installer(path: str) -> None:
     """Launch the downloaded installer silently and return immediately. It upgrades
     in place (CloseApplications in the .iss lets it close+replace our running exe);
-    the caller should quit the app right after. Models/transcripts are untouched."""
-    subprocess.Popen([path, "/SILENT", "/NOCANCEL"], close_fds=True)
+    the caller should quit the app right after. Models/transcripts are untouched.
+
+    /RELAUNCH=1 is our own parameter: a silent install normally launches nothing
+    (correct for winget), so this is what starts the new version back up."""
+    subprocess.Popen([path, "/SILENT", "/NOCANCEL", "/RELAUNCH=1"], close_fds=True)
