@@ -360,7 +360,10 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     def _open_settings():
         from .settings import SettingsWindow
         if settings_win["w"] is None:
-            settings_win["w"] = SettingsWindow(settings, overlay)
+            # This is the app's main window: closing it quits everything. on_restart
+            # applies device/model/speaker changes live (no restart).
+            settings_win["w"] = SettingsWindow(settings, overlay, quit_on_close=True,
+                                               on_restart=_restart_pipeline)
         settings_win["w"].show()
         settings_win["w"].raise_()
         settings_win["w"].activateWindow()
@@ -412,6 +415,8 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
 
     # --- runs on the GUI thread once the model is loaded and the source is built ---
     def _start_source(source) -> None:
+        for t in getattr(overlay, "_timers", ()):   # on a live rebuild, drop the old timers
+            t.stop()
         holder["src"] = source
         overlay.set_status("listening — play some audio")
         on_event = overlay.bridge.emit_event
@@ -452,6 +457,40 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     builder.failed.connect(_on_failed)
     overlay.set_status("loading model… (first run downloads ~1.5 GB, please wait)")
     builder.build(source_factory)
+
+    def _restart_pipeline() -> None:
+        """Apply a device/model/speaker change without quitting: stop the current
+        source and rebuild it from the now-updated settings, off the GUI thread."""
+        overlay.set_status("applying settings — reloading…")
+        old = holder["src"]
+        holder["src"] = None
+
+        def _work():
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+            try:
+                source = source_factory()
+            except BaseException as e:
+                builder.failed.emit(str(e) or e.__class__.__name__)
+                return
+            builder.ready.emit(source)
+        threading.Thread(target=_work, daemon=True).start()
+
+    # On launch, make the app discoverable: a tray notification (so you know it's
+    # running and where Settings is) and, by default, open the Settings window so
+    # the GUI is front-and-centre instead of hidden behind a tray right-click.
+    def _on_launch():
+        if tray is not None:
+            tray.showMessage(
+                "Live Captions",
+                "Running in the tray — right-click the icon for Settings or Quit.",
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information, 6000)
+        if getattr(settings, "open_settings_on_launch", True):
+            _open_settings()
+    QtCore.QTimer.singleShot(300, _on_launch)   # after the loop starts, so overlay/tray render first
 
     # let the interpreter process Ctrl+C while the Qt loop runs
     import signal

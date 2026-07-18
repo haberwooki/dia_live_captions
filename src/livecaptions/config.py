@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     overlay_width_frac: float = 0.7   # max pill width as a fraction of screen width
     overlay_text_color: str = "#FFFFFF"   # base caption colour (speakers override when coloured)
     speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
+    open_settings_on_launch: bool = True  # show the Settings window when the app starts
 
     # global hotkeys (Win32 RegisterHotKey). Remap here if another app claims one.
     hotkey_toggle: str = "ctrl+alt+c"     # show/hide the overlay

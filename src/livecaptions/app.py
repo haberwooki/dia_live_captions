@@ -262,54 +262,67 @@ def run(args) -> None:
         _dispatch(lambda: FakeTranscriptionSource(), settings, args, source_name="fake", is_live=False)
         return
 
-    # --- Build the audio source first (fail fast on a bad file/device). ---
-    if args.wav:
-        audio = WavFileSource(args.wav, block_sec=settings.block_sec, paced=not args.wav_fast)
-    else:
+    # --- The pipeline is (re)built from CURRENT settings so device/model/speaker
+    # changes can be applied live (no restart). build_source() is re-callable. ---
+    is_live = not bool(args.wav)
+    _wav_audio = (WavFileSource(args.wav, block_sec=settings.block_sec, paced=not args.wav_fast)
+                  if args.wav else None)
+    _cache = {}          # cached WhisperModel keyed by name — avoids a reload on a device/speaker change
+    _first = {"cli": True}
+
+    def _resolve_audio():
+        if args.wav:
+            return _wav_audio
         p = pyaudio.PyAudio()
         try:
-            dev = resolve_loopback(
-                p, index=args.loopback_index, device_substr=args.device, pick=args.pick,
-                saved_name=settings.loopback_name, saved_ordinal=settings.loopback_ordinal)
-            if args.device or args.pick:
-                save_device_choice(dev["name"], name_ordinal(enumerate_loopbacks(p), dev))
+            if _first["cli"]:   # first build honours the CLI device flags and remembers the pick
+                dev = resolve_loopback(
+                    p, index=args.loopback_index, device_substr=args.device, pick=args.pick,
+                    saved_name=settings.loopback_name, saved_ordinal=settings.loopback_ordinal)
+                if args.device or args.pick:
+                    save_device_choice(dev["name"], name_ordinal(enumerate_loopbacks(p), dev))
+                _first["cli"] = False
+            else:               # rebuilds use whatever the Settings window saved
+                dev = resolve_loopback(p, saved_name=settings.loopback_name,
+                                       saved_ordinal=settings.loopback_ordinal)
         finally:
             p.terminate()
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
-        audio = cls(dev, block_sec=settings.block_sec)
-
-    live_diarize = getattr(args, "diarize_live", False) or getattr(settings, "speaker_colors", False)
-    streaming = getattr(args, "streaming", False) or live_diarize
+        return cls(dev, block_sec=settings.block_sec)
 
     def build_source():
-        """Deferred so the overlay can show a 'loading' status while this runs.
-        Imports faster-whisper here (not at module load) so importing app is fast
-        and the overlay appears before the ~20 s cold ML import, not after it."""
+        """(Re)build capture -> model -> transcription from current settings. Called
+        off-thread; re-callable for live device/model/speaker changes. Faster-whisper
+        is imported here (not at module load) so app import stays fast."""
         from .asr.whisper import load_model
         from .sources.local import LocalTranscriptionSource
+        audio = _resolve_audio()
         bootstrap_cuda_dlls()
-        model = load_model(settings)
-        if streaming:
+        if _cache.get("name") != settings.model_name:
+            _cache["model"] = load_model(settings)
+            _cache["name"] = settings.model_name
+        model = _cache["model"]
+        live_diarize = getattr(args, "diarize_live", False) or getattr(settings, "speaker_colors", False)
+        if getattr(args, "streaming", False) or live_diarize:
             from .sources.streaming_local import StreamingTranscriptionSource
             return StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
                                                 diarize=live_diarize)
         return LocalTranscriptionSource(audio, model, settings, source_id="loopback")
 
-    if audio.is_live:
-        print(f"Capturing: {audio.name}  ({audio.rate} Hz, index {getattr(audio, 'index', '?')})")
-        print("Play some audio (a call, a video...) and speak. Ctrl+C to stop.\n")
+    if is_live:
+        print("Live capture — play some audio (a call, a video...) and speak.\n")
     else:
-        print(f"Source: {audio.name}  ({audio.rate} Hz)")
-        print("Replaying WAV...\n")
+        print(f"Source: {_wav_audio.name}  ({_wav_audio.rate} Hz)\nReplaying WAV...\n")
 
+    src_name = _wav_audio.name if args.wav else "loopback"
     writer = None
     if not getattr(args, "no_save", False):
         from .store.writer import TranscriptWriter
-        writer = TranscriptWriter(source=audio.name)
+        writer = TranscriptWriter(source=src_name)
         writer.start()
 
     try:
-        _dispatch(build_source, settings, args, source_name=audio.name, is_live=audio.is_live,
+        _dispatch(build_source, settings, args, source_name=src_name, is_live=is_live,
                   extra_sink=(writer.on_event if writer else None))
     finally:
         if writer is not None:

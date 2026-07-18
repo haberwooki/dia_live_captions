@@ -37,10 +37,12 @@ def _loopbacks() -> tuple[List[dict], Optional[int]]:
 
 
 class SettingsWindow(QtWidgets.QWidget):
-    def __init__(self, settings, overlay=None):
+    def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None):
         super().__init__(None)
         self._settings = settings
         self._overlay = overlay
+        self._quit_on_close = quit_on_close   # closing this window quits the whole app
+        self._on_restart = on_restart         # rebuild the live pipeline (device/model/speaker), or None
         self._restart_dirty = False
         self.setWindowTitle("Live Captions — Settings")
         self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
@@ -73,9 +75,26 @@ class SettingsWindow(QtWidgets.QWidget):
         if self._overlay is not None:
             self._overlay.apply_appearance()
 
-    def _mark_restart(self) -> None:
-        self._restart_dirty = True
-        self._restart_note.setText("↻ Some changes apply the next time you start Live Captions.")
+    def _apply_pipeline(self, what: str) -> None:
+        """A change that needs the capture/model pipeline rebuilt. Apply it live if
+        there's a running pipeline to restart; otherwise say exactly what will apply
+        on next launch (standalone `--settings` has nothing to restart)."""
+        if self._on_restart is not None:
+            self._restart_note.setText(f"Applying {what} change — reloading…")
+            self._on_restart()
+            QtCore.QTimer.singleShot(6000, lambda: self._restart_note.setText(""))
+        else:
+            self._restart_dirty = True
+            self._restart_note.setText(
+                f"↻ The {what} change will take effect the next time you start Live Captions.")
+
+    def closeEvent(self, event) -> None:
+        # This window is the app's main window: closing it quits everything.
+        if self._quit_on_close:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.quit()
+        event.accept()
 
     # ---- audio device ----
     def _audio_group(self) -> QtWidgets.QGroupBox:
@@ -116,7 +135,7 @@ class SettingsWindow(QtWidgets.QWidget):
             finally:
                 p.terminate()
             self._persist(loopback_name=lb["name"], loopback_ordinal=ordinal)
-        self._mark_restart()
+        self._apply_pipeline("audio device")
 
     # ---- appearance ----
     def _appearance_group(self) -> QtWidgets.QGroupBox:
@@ -185,6 +204,11 @@ class SettingsWindow(QtWidgets.QWidget):
         reset = QtWidgets.QPushButton("Reset position to bottom-centre")
         reset.clicked.connect(self._on_reset_pos)
         v.addWidget(reset)
+
+        self._open_launch = QtWidgets.QCheckBox("Open this Settings window when Live Captions starts")
+        self._open_launch.setChecked(bool(getattr(self._settings, "open_settings_on_launch", True)))
+        self._open_launch.toggled.connect(lambda on: self._persist(open_settings_on_launch=on))
+        v.addWidget(self._open_launch)
         return g
 
     def _on_movable(self, on: bool) -> None:
@@ -223,11 +247,11 @@ class SettingsWindow(QtWidgets.QWidget):
 
     def _on_speaker_colors(self, on: bool) -> None:
         self._persist(speaker_colors=on)
-        self._mark_restart()
+        self._apply_pipeline("speaker colours")
 
     def _on_model(self, name: str) -> None:
         self._persist(model_name=name)
-        self._mark_restart()
+        self._apply_pipeline("model")
 
 
 def run_settings(settings, screenshot_path: Optional[str] = None) -> None:
