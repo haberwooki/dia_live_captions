@@ -34,6 +34,18 @@ datas = []
 hiddenimports = [
     "_portaudiowpatch",     # PyAudioWPatch's C ext is imported by bare name
     "hf_xet",               # huggingface_hub imports this dynamically for fast downloads
+    # GUI tabs and the AI layer are imported INSIDE functions (to keep startup
+    # fast), which static analysis can miss. If these are dropped the app still
+    # launches and only fails when the tab is opened — the worst kind of packaging
+    # bug, so name them explicitly.
+    "livecaptions.ui.ai",
+    "livecaptions.ui.transcripts",
+    "livecaptions.llm",
+    "livecaptions.llm.providers",
+    "livecaptions.llm.credentials",
+    "livecaptions.store.naming",
+    "livecaptions.store.export",
+    "livecaptions.store.search",
 ]
 
 # --- faster-whisper's bundled Silero VAD model -------------------------------

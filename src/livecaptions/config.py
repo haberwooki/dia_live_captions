@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # which is why it is the default: a fixed checkbox cannot express "I pressed Start
     # last time, so start". "always" / "never" pin it either way.
     save_transcripts: bool = True         # write sessions to the local store (never uploaded)
+
+    # Optional AI helper (speaker naming; later, summaries). Off by default, because
+    # a non-local provider is the only thing here that sends data off the machine.
+    # NOTE: no api_key field, deliberately — keys live in Windows Credential Manager
+    # (llm/credentials.py). config.toml is plain text people copy and paste around.
+    llm_provider: str = "none"            # none | anthropic | openai | local
+    llm_model: str = ""
+    llm_base_url: str = ""
     startup_mode: str = "resume"          # resume | always | never
     last_transport_state: str = "running"  # updated as you Start/Pause/Stop
     start_captions_on_launch: bool = True  # legacy; migrated into startup_mode

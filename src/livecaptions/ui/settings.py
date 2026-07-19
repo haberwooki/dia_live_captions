@@ -69,6 +69,8 @@ class SettingsWindow(QtWidgets.QWidget):
         self._tabs.addTab(self._tab([self._audio_group()]), "Audio")
         from .transcripts import TranscriptsTab
         self._tabs.addTab(TranscriptsTab(settings), "Transcripts")
+        from .ai import AITab
+        self._tabs.addTab(AITab(settings), "AI")
         self._tabs.addTab(self._tab([self._appearance_group(), self._overlay_group()]), "Overlay")
         self._tabs.addTab(self._tab([self._updates_group(), self._about_group()]), "Updates")
         # Reopen on the tab you left on — "how I leave it is how it re-opens".

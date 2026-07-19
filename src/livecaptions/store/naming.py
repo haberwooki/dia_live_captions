@@ -83,29 +83,25 @@ def build_transcript(conn: sqlite3.Connection, session_id: int,
 
 
 def propose_names(transcript: str, labels: List[str], *,
-                  model: str = "claude-opus-4-8") -> List[SpeakerName]:
-    """Ask Claude to name each label. Network call -- caller must have consent."""
-    import anthropic
+                  model: str = "claude-opus-4-8", provider=None) -> List[SpeakerName]:
+    """Ask a model to name each label. Caller must already have consent.
 
-    client = anthropic.Anthropic()  # ANTHROPIC_API_KEY or an `ant auth login` profile
-    response = client.messages.parse(
-        model=model,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=_SYSTEM,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Labels to identify: {', '.join(labels)}\n\n"
-                f"Transcript:\n{transcript}\n\n"
-                f"Return one entry per label listed above."
-            ),
-        }],
-        output_format=SpeakerNames,
+    `provider` comes from llm.providers, so this works with Claude, any
+    OpenAI-compatible API, or a local model. Defaults to Claude to keep the CLI
+    behaving as it did.
+    """
+    if provider is None:
+        from ..llm.providers import AnthropicProvider, ProviderConfig
+        provider = AnthropicProvider(ProviderConfig(kind="anthropic", model=model))
+
+    result = provider.complete(
+        _SYSTEM,
+        (f"Labels to identify: {', '.join(labels)}\n\n"
+         f"Transcript:\n{transcript}\n\n"
+         f"Return one entry per label listed above."),
+        SpeakerNames,
     )
-    if response.stop_reason == "refusal":
-        raise RuntimeError("The model declined to answer this request.")
-    proposed = {s.label: s for s in response.parsed_output.speakers}
+    proposed = {s.label: s for s in result.speakers}
     # Trust our own label list over the model's -- never drop or invent a label.
     return [
         proposed.get(label, SpeakerName(label=label, name=None, confidence="low",
