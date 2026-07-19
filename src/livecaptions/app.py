@@ -66,7 +66,8 @@ def _dispatch(source_factory, settings, args, *, source_name: str, is_live: bool
         run_overlay(source_factory, settings, source_name=source_name, is_live=is_live,
                     movable=getattr(args, "movable", False),
                     screenshot_path=getattr(args, "screenshot", None),
-                    extra_sink=extra_sink)
+                    extra_sink=extra_sink,
+                    on_release_model=getattr(source_factory, "release_model", None))
     else:
         _run_terminal(source_factory(), settings, source_name=source_name, is_live=is_live,
                       extra_sink=extra_sink)
@@ -308,6 +309,17 @@ def run(args) -> None:
             return StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
                                                 diarize=live_diarize)
         return LocalTranscriptionSource(audio, model, settings, source_id="loopback")
+
+    def release_model():
+        """Drop the cached Whisper model so Stop actually frees VRAM. The next
+        Start reloads it (a few seconds); Pause deliberately does NOT call this.
+        The collect matters: CTranslate2 releases device memory in its destructor,
+        so the VRAM comes back only once the last reference is actually collected."""
+        import gc
+        _cache.clear()
+        gc.collect()
+
+    build_source.release_model = release_model
 
     if is_live:
         print("Live capture — play some audio (a call, a video...) and speak.\n")

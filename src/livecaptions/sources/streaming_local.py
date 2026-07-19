@@ -16,6 +16,7 @@ import os
 import queue
 import threading
 import time
+import zlib
 from typing import List, Optional
 
 import numpy as np
@@ -37,6 +38,44 @@ JUNK_FINALS = {
     "please subscribe.", "please subscribe to my channel.", "subtitles by the amara.org community",
     "i'm sorry.", "thank you so much.", "thank you all so much.",
 }
+
+
+def is_degenerate(text: str) -> bool:
+    """True for the repetition loops Whisper falls into on music, noise and clipped
+    speech ("okay. okay. okay. okay. …").
+
+    JUNK_FINALS above does NOT cover this — it is an exact-match set of 21 literal
+    strings, so it catches a single stock phrase and nothing else. This matters more
+    now that the streaming decode pins temperature=0.0: faster-whisper's own fallback
+    used compression_ratio_threshold to detect exactly this, and disabling the
+    fallback (worth it — it froze the overlay for seconds) removed that check. This
+    is the cheaper replacement, applied to the final text instead of re-decoding.
+
+    Deliberately conservative: dropping a real caption is worse than passing a bad
+    one, so short lines are always allowed and genuine emphasis ("yeah yeah yeah")
+    stays under the thresholds.
+    """
+    if not text:
+        return False
+    # Whisper's own heuristic and threshold: degenerate text compresses far better
+    # than natural speech.
+    raw = text.encode("utf-8")
+    if len(raw) > 60:
+        compressed = zlib.compress(raw)
+        if len(raw) / max(1, len(compressed)) > 2.4:
+            return True
+    # A tail n-gram repeated over and over — the classic stuck-decoder shape.
+    words = text.split()
+    for n in range(1, 6):
+        if len(words) < n * 4:
+            continue
+        tail, reps, i = words[-n:], 1, len(words) - n
+        while i - n >= 0 and words[i - n:i] == tail:
+            reps += 1
+            i -= n
+        if reps >= 4 and reps * n >= 8:
+            return True
+    return False
 
 
 #: minimum words in a line before a diarizer speaker-change is allowed to break it
@@ -95,7 +134,7 @@ class StreamingTranscriptionSource(TranscriptionSource):
 
     def _emit(self, words: List, is_final: bool, speaker: Optional[str] = None) -> None:
         text = _clean(words)
-        if is_final and (not text or text.lower() in JUNK_FINALS):
+        if is_final and (not text or text.lower() in JUNK_FINALS or is_degenerate(text)):
             return
         if not text:
             return

@@ -130,7 +130,22 @@ class OverlayWindow(QtWidgets.QWidget):
         self.bridge = CaptionBridge()
         self.bridge.event.connect(self._on_event)   # auto QueuedConnection from worker threads
         self._last_block_t = time.monotonic()
+        self._watch_screen()
         self._relayout()
+
+    def _watch_screen(self) -> None:
+        """Reposition when the screen changes. _relayout() reads the available
+        geometry, and it used to be re-run ~3x/second by the health timer — so the
+        overlay drifted back into place by accident after a resolution, DPI or
+        monitor change. set_status now skips identical repaints, so that accident is
+        gone and the screen has to be watched deliberately."""
+        app = QtGui.QGuiApplication.instance()
+        if app is None:
+            return
+        app.primaryScreenChanged.connect(lambda *_: self._relayout())
+        for screen in app.screens():
+            screen.availableGeometryChanged.connect(lambda *_: self._relayout())
+            screen.logicalDotsPerInchChanged.connect(lambda *_: self._relayout())
 
     # ---- event/state (GUI thread) ----
     # ---- hotkey actions ----
@@ -189,6 +204,13 @@ class OverlayWindow(QtWidgets.QWidget):
         self._relayout()
 
     def set_status(self, text: str, warn: bool = False) -> None:
+        # The health timer re-asserts the same status ~3x/second while no audio is
+        # arriving, and each call used to relayout + repaint. That is the DEFAULT
+        # state of a tray app nobody is speaking into, so it burned CPU for a frame
+        # identical to the last one. Compare both fields: _on_event and the health
+        # timer can differ only in `warn`.
+        if text == self._status and warn == self._status_warn:
+            return
         self._status = text
         self._status_warn = warn
         self._relayout()
@@ -337,9 +359,42 @@ class _SourceBuilder(QtCore.QObject):
         threading.Thread(target=_work, daemon=True).start()
 
 
+class Transport(QtCore.QObject):
+    """Start / pause / stop the capture+ASR pipeline without quitting the app.
+
+    The states differ in what they release, which is what makes them worth having
+    as separate controls:
+      running  - capturing and transcribing
+      starting - building the pipeline (model load / device open)
+      paused   - capture and inference stopped, model still resident: resumes fast
+      stopped  - as paused, and the model is released (frees ~2 GB of VRAM)
+      error    - the last start failed; the message is on the overlay
+    """
+    state_changed = QtCore.Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._state = "starting"
+        self.start = self.pause = self.stop = lambda: None   # wired by run_overlay
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def is_active(self) -> bool:
+        return self._state in ("running", "starting")
+
+    def _set(self, state: str) -> None:
+        if state != self._state:
+            self._state = state
+            self.state_changed.emit(state)
+
+
 def run_overlay(source_factory: Callable[[], object], settings, *, source_name: str,
                 is_live: bool, movable: bool = False,
-                screenshot_path: Optional[str] = None, extra_sink=None) -> None:
+                screenshot_path: Optional[str] = None, extra_sink=None,
+                on_release_model=None) -> None:
     """Own the Qt event loop (main thread). Shows the overlay first, then builds
     the source (model load) off-thread so there's always a visible status."""
     QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -355,6 +410,9 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     if not movable:
         overlay.apply_click_through(True)   # after the native window exists
 
+    # Created before the tray and the Settings window, which both drive it.
+    transport = Transport()
+
     # --- system tray: the only visible way to quit, and the "it's running" signal ---
     tray = None
     settings_win = {"w": None}
@@ -365,14 +423,16 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
             # This is the app's main window: closing it quits everything. on_restart
             # applies device/model/speaker changes live (no restart).
             settings_win["w"] = SettingsWindow(settings, overlay, quit_on_close=True,
-                                               on_restart=_restart_pipeline)
+                                               on_restart=_restart_pipeline,
+                                               transport=transport)
         settings_win["w"].show()
         settings_win["w"].raise_()
         settings_win["w"].activateWindow()
 
     if not screenshot_path:
         from .tray import install_tray
-        tray = install_tray(app, overlay, on_quit=app.quit, on_settings=_open_settings)
+        tray = install_tray(app, overlay, on_quit=app.quit, on_settings=_open_settings,
+                            transport=transport)
 
     # --- global hotkeys (the overlay is click-through, so Qt shortcuts can't work) ---
     hotkeys = None
@@ -383,7 +443,11 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
         app.installNativeEventFilter(hotkeys)
         bound = [
             hotkeys.register(settings.hotkey_toggle, overlay.toggle_visible, "show/hide"),
-            hotkeys.register(settings.hotkey_pause, overlay.toggle_paused, "pause"),
+            # Pause now really stops capture+inference (and frees the GPU), rather
+            # than freezing a pipeline that keeps burning power behind a still overlay.
+            hotkeys.register(settings.hotkey_pause,
+                             lambda: transport.pause() if transport.is_active else transport.start(),
+                             "pause/resume"),
             hotkeys.register(settings.hotkey_quit, app.quit, "quit"),
             hotkeys.register(settings.hotkey_left, lambda: overlay.nudge(-px, 0), "move left"),
             hotkeys.register(settings.hotkey_right, lambda: overlay.nudge(px, 0), "move right"),
@@ -427,6 +491,7 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
             t.stop()
         holder["src"] = source
         overlay.set_status("listening — play some audio")
+        transport._set("running")
         if holder["restarting"]:
             holder["restarting"] = False
             _tell_settings("✓ Applied — captions are running again.")
@@ -464,6 +529,7 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
 
     def _on_failed(msg: str) -> None:
         overlay.set_status(f"couldn't start: {msg[:90]}", warn=True)
+        transport._set("error")
         if holder["restarting"]:
             holder["restarting"] = False
             _tell_settings(f"Couldn't apply that change: {msg[:200]}\n"
@@ -472,22 +538,33 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     builder = _SourceBuilder()
     builder.ready.connect(_start_source)
     builder.failed.connect(_on_failed)
-    overlay.set_status("loading model… (first run downloads ~1.5 GB, please wait)")
-    builder.build(source_factory)
+    # Whether captions run the moment the app opens is the user's call, not ours.
+    if getattr(settings, "start_captions_on_launch", True) or not is_live:
+        overlay.set_status("loading model… (first run downloads ~1.5 GB, please wait)")
+        builder.build(source_factory)
+    else:
+        transport._set("stopped")
+        overlay.set_status("stopped — click Start in Settings to begin", warn=True)
 
-    def _restart_pipeline() -> None:
-        """Apply a device/model/speaker change without quitting: stop the current
-        source and rebuild it from the now-updated settings, off the GUI thread."""
-        # Stop the old timers FIRST. Stopping a source sets its `finished` event,
-        # and the still-running done-timer would see that on a live source and
-        # quit the whole app mid-restart.
+    def _detach_source():
+        """Drop the running source and its timers, returning the old source to be
+        stopped off-thread. Timers go FIRST: stopping a source sets its `finished`
+        event, and a still-running done-timer would read that on a live source and
+        quit the whole app."""
         for t in getattr(overlay, "_timers", ()):
             t.stop()
         overlay._timers = ()
-        overlay.set_status("applying settings — reloading…")
         old = holder["src"]
         holder["src"] = None
+        return old
+
+    def _rebuild(status: str) -> None:
+        """Stop the current source (if any) and build a fresh one from current
+        settings, off the GUI thread. Used for both settings changes and Start."""
+        old = _detach_source()
         holder["restarting"] = True
+        transport._set("starting")
+        overlay.set_status(status)
 
         def _work():
             if old is not None:
@@ -502,6 +579,37 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
                 return
             builder.ready.emit(source)
         threading.Thread(target=_work, daemon=True).start()
+
+    def _halt(state: str, status: str) -> None:
+        """Stop capturing/transcribing. 'stopped' also releases the model (VRAM);
+        'paused' keeps it resident so resuming is quick."""
+        old = _detach_source()
+        holder["restarting"] = False
+        transport._set(state)
+        overlay.set_status(status, warn=True)
+
+        def _work():
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+            if state == "stopped" and on_release_model is not None:
+                try:
+                    on_release_model()
+                except Exception:
+                    pass
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _restart_pipeline() -> None:
+        _rebuild("applying settings — reloading…")
+
+    transport.start = lambda: (None if transport.is_active
+                               else _rebuild("starting…"))
+    transport.pause = lambda: (_halt("paused", "paused — click Resume to start again")
+                               if transport.is_active else None)
+    transport.stop = lambda: (None if transport.state == "stopped"
+                              else _halt("stopped", "stopped — click Start to begin"))
 
     # On launch, make the app discoverable: a tray notification (so you know it's
     # running and where Settings is) and, by default, open the Settings window so

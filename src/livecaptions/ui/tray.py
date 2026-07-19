@@ -44,7 +44,7 @@ def make_icon() -> QtGui.QIcon:
 
 
 def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit,
-                 on_settings=None) -> QtWidgets.QSystemTrayIcon | None:
+                 on_settings=None, transport=None) -> QtWidgets.QSystemTrayIcon | None:
     """Add a tray icon whose menu controls the overlay. Returns it (keep a
     reference alive) or None if the platform has no system tray."""
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
@@ -57,8 +57,18 @@ def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit,
     act_show = menu.addAction("Show / hide overlay")
     act_show.triggered.connect(overlay.toggle_visible)
 
+    # Transport, when there's a real pipeline to drive. Falls back to the old
+    # display-only pause for the demo/screenshot paths, which have no transport.
     act_pause = menu.addAction("Pause captions")
-    act_pause.triggered.connect(overlay.toggle_paused)
+    act_stop = menu.addAction("Stop captions")
+    if transport is not None:
+        act_pause.triggered.connect(
+            lambda: transport.pause() if transport.is_active else transport.start())
+        act_stop.triggered.connect(
+            lambda: transport.start() if transport.state == "stopped" else transport.stop())
+    else:
+        act_pause.triggered.connect(overlay.toggle_paused)
+        act_stop.setVisible(False)
 
     menu.addSeparator()
     act_settings = menu.addAction("Settings…")
@@ -71,8 +81,14 @@ def install_tray(app: QtWidgets.QApplication, overlay, *, on_quit,
     act_quit = menu.addAction("Quit Live Captions")
     act_quit.triggered.connect(on_quit)
 
-    # Keep the Pause label in sync with the actual state each time the menu opens.
+    # Keep the labels in sync with the actual state each time the menu opens.
     def _sync():
+        if transport is not None:
+            act_pause.setText("Pause captions" if transport.is_active else "Resume captions")
+            act_pause.setEnabled(transport.state != "starting")
+            act_stop.setText("Start captions" if transport.state == "stopped"
+                             else "Stop captions (frees video memory)")
+            return
         act_pause.setText("Resume captions" if getattr(overlay, "_paused", False)
                           else "Pause captions")
     menu.aboutToShow.connect(_sync)

@@ -42,23 +42,36 @@ class SettingsWindow(QtWidgets.QWidget):
     _dl_progress = QtCore.Signal(int)
     _dl_done = QtCore.Signal(str)         # "" on success, else an error string
 
-    def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None):
+    def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None,
+                 transport=None):
         super().__init__(None)
         self._settings = settings
         self._overlay = overlay
         self._quit_on_close = quit_on_close   # closing this window quits the whole app
         self._on_restart = on_restart         # rebuild the live pipeline (device/model/speaker), or None
+        self._transport = transport           # start/pause/stop the pipeline, or None
         self._restart_dirty = False
         self.setWindowTitle("Live Captions — Settings")
         self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumWidth(420)
 
         root = QtWidgets.QVBoxLayout(self)
-        root.addWidget(self._audio_group())
-        root.addWidget(self._appearance_group())
-        root.addWidget(self._overlay_group())
-        root.addWidget(self._features_group())
-        root.addWidget(self._updates_group())
+
+        # Transport sits ABOVE the tabs: whatever you're configuring, the run/stop
+        # state and the Start/Pause buttons stay visible.
+        if transport is not None:
+            root.addWidget(self._transport_group())
+
+        self._tabs = QtWidgets.QTabWidget()
+        self._tabs.addTab(self._tab([self._features_group()]), "Captions")
+        self._tabs.addTab(self._tab([self._audio_group()]), "Audio")
+        self._tabs.addTab(self._tab([self._appearance_group(), self._overlay_group()]), "Overlay")
+        self._tabs.addTab(self._tab([self._updates_group(), self._about_group()]), "Updates")
+        # Reopen on the tab you left on — "how I leave it is how it re-opens".
+        idx = int(getattr(self._settings, "settings_tab", 0) or 0)
+        self._tabs.setCurrentIndex(idx if 0 <= idx < self._tabs.count() else 0)
+        self._tabs.currentChanged.connect(lambda i: self._persist(settings_tab=int(i)))
+        root.addWidget(self._tabs)
 
         self._check_done.connect(self._on_check_done)
         self._dl_progress.connect(self._on_dl_progress)
@@ -70,11 +83,88 @@ class SettingsWindow(QtWidgets.QWidget):
         root.addWidget(self._restart_note)
 
         row = QtWidgets.QHBoxLayout()
+        hint = QtWidgets.QLabel("Everything here saves as you change it.")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        row.addWidget(hint)
         row.addStretch(1)
         close = QtWidgets.QPushButton("Close")
         close.clicked.connect(self.close)
         row.addWidget(close)
         root.addLayout(row)
+
+    @staticmethod
+    def _tab(widgets) -> QtWidgets.QWidget:
+        """Wrap group boxes into a tab page, top-aligned."""
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        for w in widgets:
+            v.addWidget(w)
+        v.addStretch(1)
+        return page
+
+    def _about_group(self) -> QtWidgets.QGroupBox:
+        g = QtWidgets.QGroupBox("About")
+        v = QtWidgets.QVBoxLayout(g)
+        lbl = QtWidgets.QLabel(
+            "Live Captions runs entirely on this machine — audio, transcription and "
+            "speaker detection never leave it.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: gray; font-size: 11px;")
+        v.addWidget(lbl)
+        return g
+
+    # ---- transport: run the captions without closing the app ----
+    _STATE_TEXT = {
+        "running":  ("● Captions running", "#3a8a4a"),
+        "starting": ("◐ Starting…", "#d08a30"),
+        "paused":   ("❚❚ Paused — model still loaded, resumes quickly", "#d08a30"),
+        "stopped":  ("■ Stopped — model unloaded (frees video memory)", "#888888"),
+        "error":    ("▲ Couldn't start — see the overlay", "#c04a3a"),
+    }
+
+    def _transport_group(self) -> QtWidgets.QGroupBox:
+        g = QtWidgets.QGroupBox("Captions")
+        v = QtWidgets.QVBoxLayout(g)
+
+        self._state_lbl = QtWidgets.QLabel("")
+        v.addWidget(self._state_lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        self._btn_start = QtWidgets.QPushButton("Start")
+        self._btn_pause = QtWidgets.QPushButton("Pause")
+        self._btn_stop = QtWidgets.QPushButton("Stop")
+        self._btn_start.clicked.connect(lambda: self._transport.start())
+        self._btn_pause.clicked.connect(self._on_pause_clicked)
+        self._btn_stop.clicked.connect(lambda: self._transport.stop())
+        for b in (self._btn_start, self._btn_pause, self._btn_stop):
+            row.addWidget(b)
+        v.addLayout(row)
+
+        self._start_launch = QtWidgets.QCheckBox("Start captioning as soon as the app opens")
+        self._start_launch.setChecked(bool(getattr(self._settings, "start_captions_on_launch", True)))
+        self._start_launch.toggled.connect(lambda on: self._persist(start_captions_on_launch=on))
+        v.addWidget(self._start_launch)
+
+        self._transport.state_changed.connect(self._on_transport_state)
+        self._on_transport_state(self._transport.state)
+        return g
+
+    def _on_pause_clicked(self) -> None:
+        if self._transport.is_active:
+            self._transport.pause()
+        else:
+            self._transport.start()          # the button doubles as Resume
+
+    @QtCore.Slot(str)
+    def _on_transport_state(self, state: str) -> None:
+        text, colour = self._STATE_TEXT.get(state, (state, "#888888"))
+        self._state_lbl.setText(text)
+        self._state_lbl.setStyleSheet(f"color: {colour};")
+        active = state in ("running", "starting")
+        self._btn_start.setEnabled(not active)
+        self._btn_stop.setEnabled(state != "stopped")
+        self._btn_pause.setEnabled(state != "starting")
+        self._btn_pause.setText("Pause" if active else "Resume")
 
     # ---- persistence + live apply helpers ----
     def _persist(self, **kwargs) -> None:
@@ -245,7 +335,7 @@ class SettingsWindow(QtWidgets.QWidget):
 
     # ---- features (restart to apply) ----
     def _features_group(self) -> QtWidgets.QGroupBox:
-        g = QtWidgets.QGroupBox("Captions")
+        g = QtWidgets.QGroupBox("Speech recognition")
         form = QtWidgets.QFormLayout(g)
 
         self._colors = QtWidgets.QCheckBox("Colour captions by speaker (live diarization)")
