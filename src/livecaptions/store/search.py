@@ -92,3 +92,18 @@ def recent_sessions(conn: sqlite3.Connection, limit: int = 10) -> List[sqlite3.R
                     WHERE session_id = s.id AND speaker IS NOT NULL) AS speakers
            FROM sessions s LEFT JOIN utterances u ON u.session_id = s.id
            GROUP BY s.id ORDER BY s.id DESC LIMIT ?""", (limit,)).fetchall()
+
+
+def delete_session(conn: sqlite3.Connection, session_id: int) -> int:
+    """Delete a session and its lines. Returns the number of lines removed.
+
+    Deletes the utterances explicitly rather than leaning on ON DELETE CASCADE:
+    the full-text index is maintained by AFTER DELETE triggers on `utterances`,
+    and whether those fire for cascade-deleted rows depends on pragmas that are
+    easy to change by accident. Doing it directly means a deleted session cannot
+    keep turning up in search.
+    """
+    n = conn.execute("DELETE FROM utterances WHERE session_id=?", (session_id,)).rowcount
+    conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    conn.commit()
+    return int(n or 0)

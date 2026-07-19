@@ -80,6 +80,9 @@ class TranscriptsTab(QtWidgets.QWidget):
         self._rename = QtWidgets.QPushButton("Rename speaker…")
         self._rename.clicked.connect(self._on_rename)
         brow.addWidget(self._rename)
+        self._delete = QtWidgets.QPushButton("Delete…")
+        self._delete.clicked.connect(self._on_delete)
+        brow.addWidget(self._delete)
         self._export = QtWidgets.QPushButton("Export…")
         self._export.clicked.connect(self._on_export)
         brow.addWidget(self._export)
@@ -212,6 +215,79 @@ class TranscriptsTab(QtWidgets.QWidget):
             self._status.setText(f"Exported to {path}")
         except Exception as e:
             self._status.setText(f"Export failed: {e}")
+
+    # ---- delete a session, and everything attached to it ----
+    def _on_delete(self) -> None:
+        """Remove a session's transcript, its notes, and its saved audio.
+
+        Audio is the reason this exists: until now nothing ever deleted a session's
+        WAV, so raw recordings of private conversations accumulated with no way to
+        remove them from inside the app. The dialog lists every artefact by name and
+        size, because "delete this session" should not quietly leave 90 MB of audio
+        behind — nor delete it as a surprise.
+        """
+        if self._session_id is None:
+            self._status.setText("Pick a session to delete first.")
+            return
+        sid = self._session_id
+        conn = self._ensure()
+
+        lines = conn.execute("SELECT COUNT(*) FROM utterances WHERE session_id=?",
+                             (sid,)).fetchone()[0]
+        items = [f"• {lines} transcript line(s)"]
+
+        try:
+            from ..notes import load_notes
+            has_notes = load_notes(conn, sid) is not None
+        except Exception:
+            has_notes = False
+        if has_notes:
+            items.append("• the generated notes for this session")
+
+        audio = None
+        try:
+            from ..capture.recorder import find_session_audio, format_bytes
+            audio = find_session_audio(sid, settings=self._settings)
+            if audio is not None:
+                items.append(f"• the saved audio ({format_bytes(audio.stat().st_size)}) "
+                             f"— re-diarizing this session will no longer be possible")
+        except Exception:
+            audio = None
+
+        ok = QtWidgets.QMessageBox.question(
+            self, "Delete this session?",
+            f"Session {sid} will be permanently removed:\n\n" + "\n".join(items) +
+            "\n\nThis cannot be undone.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ok != QtWidgets.QMessageBox.StandardButton.Yes:
+            self._status.setText("Nothing was deleted.")
+            return
+
+        removed = []
+        from ..store.search import delete_session
+        removed.append(f"{delete_session(conn, sid)} line(s)")
+        if has_notes:
+            try:
+                from ..notes import delete_notes
+                if delete_notes(conn, sid):
+                    removed.append("notes")
+            except Exception:
+                pass
+        if audio is not None:
+            try:
+                from ..capture.recorder import delete_session_audio
+                gone, why = delete_session_audio(sid, settings=self._settings)
+                # delete_session_audio returns a reason rather than printing, because
+                # print() is a no-op in the windowed build — surface it.
+                removed.append("audio" if gone else f"audio NOT deleted ({why})")
+            except Exception as e:
+                removed.append(f"audio NOT deleted ({e})")
+
+        self._session_id = None
+        self._text.clear()
+        self.refresh()
+        self._status.setText("Deleted: " + ", ".join(removed) + ".")
 
     # ---- rename a speaker ----
     def _on_rename(self) -> None:

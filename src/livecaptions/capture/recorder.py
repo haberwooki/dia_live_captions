@@ -143,21 +143,22 @@ def repair_wav_header(path: Path | str) -> int:
         return 0
 
 
-def find_session_audio(session_id: int, base: Path | str | None = None) -> Optional[Path]:
+def find_session_audio(session_id: int, base: Path | str | None = None,
+                       settings=None) -> Optional[Path]:
     """The audio for a session, or None if it was never saved or has been deleted.
 
     Repairs a stale header on the way out (module docstring) so every consumer
     gets the full recording without knowing a kill happened.
     """
-    path = session_audio_path(session_id, base)
+    path = session_audio_path(session_id, base, settings)
     if not path.is_file():
         return None
     repair_wav_header(path)
     return path
 
 
-def delete_session_audio(session_id: int,
-                         base: Path | str | None = None) -> Tuple[bool, str]:
+def delete_session_audio(session_id: int, base: Path | str | None = None,
+                         settings=None) -> Tuple[bool, str]:
     """Delete one session's audio. Returns (removed, error).
 
     ``error`` is empty when the file was removed or was already gone, and carries
@@ -165,7 +166,7 @@ def delete_session_audio(session_id: int,
     read-only drive. Reported rather than printed because print() goes nowhere in
     the windowed PyInstaller build, which would make "Delete" look like it worked.
     """
-    path = session_audio_path(session_id, base)
+    path = session_audio_path(session_id, base, settings)
     try:
         path.unlink()
         return True, ""

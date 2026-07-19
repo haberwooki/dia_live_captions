@@ -29,6 +29,7 @@ _KIND_BY_INDEX = ["none", "anthropic", "openai", "local"]
 class AITab(QtWidgets.QWidget):
     _test_done = QtCore.Signal(object)      # {"ok": str} | {"err": str}
     _names_done = QtCore.Signal(object)     # {"proposals": [...]} | {"err": str}
+    _notes_done = QtCore.Signal(object)     # {"notes": StoredNotes} | {"err": str}
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -39,10 +40,11 @@ class AITab(QtWidgets.QWidget):
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(self._provider_group())
         v.addWidget(self._naming_group())
-        v.addStretch(1)
+        v.addWidget(self._notes_group(), 1)
 
         self._test_done.connect(self._on_test_done)
         self._names_done.connect(self._on_names_done)
+        self._notes_done.connect(self._on_notes_done)
         self._sync_fields()
 
     # ---- provider setup ----
@@ -228,10 +230,149 @@ class AITab(QtWidgets.QWidget):
         v.addWidget(self._name_status)
         return g
 
+    # ---- notes: summary, key points, decisions, to-dos ----
+    def _notes_group(self) -> QtWidgets.QGroupBox:
+        g = QtWidgets.QGroupBox("Notes from a session")
+        v = QtWidgets.QVBoxLayout(g)
+        blurb = QtWidgets.QLabel(
+            "A summary, the key points, decisions, and to-dos — each to-do tied to "
+            "a quote of someone actually committing to it, with no owner rather than "
+            "a guessed one.")
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet("color: gray; font-size: 11px;")
+        v.addWidget(blurb)
+
+        row = QtWidgets.QHBoxLayout()
+        self._notes_btn = QtWidgets.QPushButton("Generate notes…")
+        self._notes_btn.clicked.connect(self._on_notes)
+        row.addWidget(self._notes_btn)
+        copy = QtWidgets.QPushButton("Copy")
+        copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(
+            self._notes_view.toPlainText()))
+        row.addWidget(copy)
+        save = QtWidgets.QPushButton("Save as…")
+        save.clicked.connect(self._on_save_notes)
+        row.addWidget(save)
+        v.addLayout(row)
+
+        self._notes_view = QtWidgets.QPlainTextEdit()
+        self._notes_view.setReadOnly(True)
+        self._notes_view.setPlaceholderText(
+            "Pick a session above, then Generate. Notes are saved, so reopening a "
+            "session shows what was made before without asking the model again.")
+        v.addWidget(self._notes_view, 1)
+
+        self._notes_status = QtWidgets.QLabel("")
+        self._notes_status.setWordWrap(True)
+        self._notes_status.setStyleSheet("color: gray; font-size: 11px;")
+        v.addWidget(self._notes_status)
+        return g
+
+    def _show_existing_notes(self) -> None:
+        """Show what was already generated for the selected session, so the user is
+        never asked to pay for (and send) the same transcript twice by accident."""
+        sid = self._sessions.currentData()
+        if sid is None:
+            return
+        try:
+            from ..notes import load_notes, to_markdown
+            stored = load_notes(self._ensure(), int(sid))
+        except Exception as e:
+            self._notes_status.setText(f"Couldn't read saved notes: {e}")
+            return
+        if stored is None:
+            self._notes_view.clear()
+            self._notes_btn.setText("Generate notes…")
+            self._notes_status.setText("")
+            return
+        self._notes_view.setPlainText(to_markdown(stored))
+        self._notes_btn.setText("Regenerate notes…")
+        self._notes_status.setText(f"Saved notes, generated {stored.generated_at}."
+                                   if getattr(stored, "generated_at", None)
+                                   else "Saved notes.")
+
+    def _on_notes(self) -> None:
+        sid = self._sessions.currentData()
+        if sid is None:
+            self._notes_status.setText("Pick a session first.")
+            return
+        kind = str(getattr(self._settings, "llm_provider", "none") or "none")
+        if kind == "none":
+            self._notes_status.setText("Choose a model provider above first.")
+            return
+        conn = self._ensure()
+        max_chars = int(getattr(self._settings, "notes_max_chars", 120_000) or 120_000)
+        try:
+            from ..notes import privacy_notice
+            # The notice counts the FULL payload (transcript + prompt + headers), not
+            # just the transcript — consent should cover what is actually sent.
+            notice = privacy_notice(P.config_from_settings(self._settings),
+                                    conn, int(sid), max_chars)
+        except Exception as e:
+            self._notes_status.setText(f"Couldn't prepare that session: {e}")
+            return
+
+        ok = QtWidgets.QMessageBox.question(
+            self, "Send this transcript?", f"{notice}\n\nGo ahead?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ok != QtWidgets.QMessageBox.StandardButton.Yes:
+            self._notes_status.setText("Cancelled. Nothing was sent.")
+            return
+
+        self._notes_btn.setEnabled(False)
+        self._notes_status.setText("Working… this reads the whole session, so give it a moment.")
+
+        def work():
+            try:
+                from ..notes import generate_notes
+                prov = P.from_settings(self._settings, P.resolve_api_key(kind))
+                notes = generate_notes(conn, int(sid), prov, consented=True,
+                                       max_chars=max_chars)
+                self._notes_done.emit({"notes": notes})
+            except Exception as e:
+                self._notes_done.emit({"err": f"{type(e).__name__}: {e}"})
+        threading.Thread(target=work, daemon=True).start()
+
+    @QtCore.Slot(object)
+    def _on_notes_done(self, payload: dict) -> None:
+        self._notes_btn.setEnabled(True)
+        if payload.get("err"):
+            self._notes_status.setText(f"Couldn't make notes: {payload['err']}")
+            return
+        from ..notes import to_markdown
+        notes = payload["notes"]
+        self._notes_view.setPlainText(to_markdown(notes))
+        self._notes_btn.setText("Regenerate notes…")
+        todos = len(getattr(notes, "todos", []) or [])
+        self._notes_status.setText(
+            f"Done — {todos} to-do(s). Saved, so this session won't be sent again "
+            f"unless you regenerate." if todos else
+            "Done — no to-dos found. The model is told to report none rather than "
+            "invent them.")
+
+    def _on_save_notes(self) -> None:
+        text = self._notes_view.toPlainText()
+        if not text.strip():
+            self._notes_status.setText("Nothing to save yet.")
+            return
+        sid = self._sessions.currentData()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save notes", f"session-{sid}-notes.md", "Markdown (*.md)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self._notes_status.setText(f"Saved to {path}")
+        except OSError as e:
+            self._notes_status.setText(f"Couldn't save: {e}")
+
     def showEvent(self, event):
         super().showEvent(event)
         self._load_sessions()
         self._sync_fields()
+        self._show_existing_notes()
 
     def _ensure(self):
         if self._conn is None:
