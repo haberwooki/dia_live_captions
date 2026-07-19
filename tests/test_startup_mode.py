@@ -7,8 +7,18 @@ left it"; only a state recorded as it changes can.
 """
 import pytest
 
+from livecaptions import config
 from livecaptions.config import Settings
 from livecaptions.ui.overlay import should_start_on_launch
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path, monkeypatch):
+    """Settings() reads config.toml, so without this every test here silently
+    measures the developer's own machine. It did: "a fresh install" passed until the
+    real config gained startup_mode="never", then failed for a correct reason."""
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.toml")
 
 
 def s(**kw):
