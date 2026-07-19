@@ -45,7 +45,7 @@ class SettingsWindow(QtWidgets.QWidget):
     _detect_done = QtCore.Signal(object)  # device probe results, marshalled to the GUI thread
 
     def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None,
-                 transport=None):
+                 transport=None, registered=None):
         super().__init__(None)
         self._settings = settings
         self._overlay = overlay
@@ -69,8 +69,17 @@ class SettingsWindow(QtWidgets.QWidget):
         self._tabs.addTab(self._tab([self._audio_group()]), "Audio")
         from .transcripts import TranscriptsTab
         self._tabs.addTab(TranscriptsTab(settings), "Transcripts")
+        from .diarization import DiarizationTab
+        # Live speaker colours are configured here now, not in the Captions tab, so
+        # there is one place that owns them; pass the pipeline restart so toggling
+        # takes effect immediately rather than on next launch.
+        self._tabs.addTab(DiarizationTab(settings, apply_pipeline=self._apply_pipeline),
+                          "Speakers")
         from .ai import AITab
         self._tabs.addTab(AITab(settings), "AI")
+        from .advanced import AdvancedTab
+        self._tabs.addTab(AdvancedTab(settings, on_restart=on_restart,
+                                      registered=registered), "Advanced")
         self._tabs.addTab(self._tab([self._appearance_group(), self._overlay_group()]), "Overlay")
         self._tabs.addTab(self._tab([self._updates_group(), self._about_group()]), "Updates")
         # Reopen on the tab you left on — "how I leave it is how it re-opens".

@@ -49,13 +49,18 @@ class DiarizeRequest:
 
 
 def audio_dir(settings) -> Path:
-    """Where saved session audio lives. `audio_save_dir` is owned by the
-    recording feature; fall back to the platform data dir until it exists."""
-    configured = getattr(settings, "audio_save_dir", "") or ""
-    if configured:
-        return Path(configured).expanduser()
-    import platformdirs
-    return Path(platformdirs.user_data_dir("live-captions", appauthor=False)) / "audio"
+    """Where saved session audio lives.
+
+    Unset `audio_save_dir` must resolve to the SAME directory the recorder writes
+    to, or the tab reports "no saved audio" for sessions whose WAV is sitting on
+    disk. capture.recorder derives it from DB_PATH at call time, so ask it rather
+    than re-deriving here and drifting from it (it used to guess a platformdirs
+    path the recorder never writes to).
+    """
+    # Delegate entirely, including the configured case: two implementations of
+    # "where is the audio" is exactly how these drifted apart the first time.
+    from ..capture.recorder import audio_dir as recorder_audio_dir
+    return recorder_audio_dir(settings=settings)
 
 
 def session_audio_path(settings, session_id: int,
@@ -73,8 +78,12 @@ def session_audio_path(settings, session_id: int,
             return p
 
     d = audio_dir(settings)
-    for name in (f"session-{session_id}.wav", f"session_{session_id}.wav",
-                 f"{session_id}.wav"):
+    from ..capture.recorder import session_audio_path as recorder_name
+    # The recorder's own name first, and taken from the recorder so the two can
+    # never disagree; the rest are tolerated for hand-placed files.
+    names = [recorder_name(session_id, d).name,
+             f"session-{session_id}.wav", f"{session_id}.wav"]
+    for name in names:
         p = d / name
         if p.is_file():
             return p
@@ -114,17 +123,22 @@ def apply_speakers(conn, session_id: int, turns: Sequence) -> int:
     """
     from ..diarize.assign import best_speaker
     rows = conn.execute(
-        "SELECT id, t_start, t_end FROM utterances WHERE session_id=? ORDER BY t_start",
-        (session_id,)).fetchall()
+        "SELECT id, t_start, t_end, speaker FROM utterances "
+        "WHERE session_id=? ORDER BY t_start", (session_id,)).fetchall()
     changed = 0
     for r in rows:
         who = best_speaker(float(r["t_start"]), float(r["t_end"]), turns)
         if who is None:
             continue                    # no turn to attribute it to: leave it alone
-        cur = conn.execute(
+        if who == r["speaker"]:
+            # rowcount counts rows MATCHED, not rows altered, so counting it here
+            # would report "Relabelled 200 lines" for a pass that agreed with the
+            # labels already stored.
+            continue
+        conn.execute(
             "UPDATE utterances SET speaker=? WHERE id=? AND session_id=?",
             (who, r["id"], session_id))
-        changed += cur.rowcount
+        changed += 1
     conn.commit()
     return changed
 
@@ -165,9 +179,12 @@ class DiarizationTab(QtWidgets.QWidget):
     _progress = QtCore.Signal(str)
     _finished = QtCore.Signal(object)    # the run_offline_pass dict, or {"err": ...}
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, apply_pipeline=None):
         super().__init__(parent)
         self._settings = settings
+        # Set by the integrator so toggling live colours rebuilds the running
+        # pipeline immediately; without it the change waits for the next launch.
+        self._apply_pipeline = apply_pipeline
         self._conn = None
         self._cancel = threading.Event()
         self._running = False
@@ -203,6 +220,8 @@ class DiarizationTab(QtWidgets.QWidget):
 
     def _on_colors(self, on: bool) -> None:
         self._persist(speaker_colors=on)
+        if self._apply_pipeline is not None:
+            self._apply_pipeline("speaker colours")
 
     def _persist(self, **kw) -> None:
         for k, val in kw.items():
@@ -302,8 +321,12 @@ class DiarizationTab(QtWidgets.QWidget):
         if session_id is not None:
             try:
                 labels = speaker_order(self._ensure(), session_id)
-            except Exception:
-                labels = []
+            except Exception as e:
+                # "no speaker labels" would be a lie about a store we failed to
+                # read, and would send the user off to re-diarize a session that
+                # is probably labelled fine.
+                self._legend_empty.setText(f"Couldn't read the speakers: {e}")
+                return
         if not labels:
             self._legend_empty.setText(
                 "That session has no speaker labels — turn on live colours before "
@@ -333,6 +356,17 @@ class DiarizationTab(QtWidgets.QWidget):
             from ..store.db import DB_PATH, connect
             self._conn = connect(DB_PATH)
         return self._conn
+
+    def closeEvent(self, event):
+        # _ensure() opens a long-lived sqlite handle; without this it outlives the
+        # widget and keeps the WAL files open until the process exits.
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -465,7 +499,12 @@ class DiarizationTab(QtWidgets.QWidget):
     @QtCore.Slot(object)
     def _on_finished(self, payload: dict) -> None:
         self._set_running(False)
-        if payload.get("cancelled"):
+        # The worker's last cancellation checkpoint is before it returns, so a
+        # Cancel pressed after it — including during this signal's own hop onto
+        # the GUI thread — arrives with a perfectly successful payload. _on_cancel
+        # promised nothing would be written; honour that here, the last place that
+        # still can.
+        if payload.get("cancelled") or self._cancel.is_set():
             self._status.setText("Stopped. The transcript is unchanged.")
             return
         if payload.get("err"):

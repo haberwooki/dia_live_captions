@@ -138,6 +138,76 @@ if importlib.util.find_spec("cuda") is not None:
 # eager exclude that NeMo imports dynamically fails at runtime, not build time.
 excludes = ["pytest", "_pytest", "pyinstaller", "PyInstaller"]
 
+
+# --- Trimming Qt payload nothing in this app touches --------------------------
+# Worth ~26 MB unpacked / ~6 MB on the installer, measured. This CANNOT go in
+# `excludes` above: that list is Python MODULES only, and opengl32sw.dll is
+# injected unconditionally by PySide6's hook on Windows. The only place it can be
+# removed is the TOCs, after Analysis and before COLLECT — and there are four of
+# them, because there are two Analysis objects.
+#   opengl32sw.dll (~20 MB) is Qt's SOFTWARE OpenGL rasterizer. The overlay is
+#     pure raster QtWidgets — there is no QOpenGLWidget anywhere in src/ — and
+#     with the DLL renamed away the overlay still paints and .grab()s correctly
+#     even under a forced QT_OPENGL=software. Qt6OpenGL*.dll must NOT go: Qt6Gui
+#     links them regardless of whether the app draws with GL.
+#   translations/*.qm (~6 MB, 196 files) are Qt's own UI translations. Nothing
+#     installs a QTranslator, so every user sees English no matter which ship.
+def _is_software_opengl(name: str) -> bool:
+    return os.path.basename(name).lower() == "opengl32sw.dll"
+
+
+def _is_qt_translation(name: str) -> bool:
+    # Match on the path shape, not on a PySide6/ prefix: the hook has moved these
+    # between PySide6/translations and PySide6/Qt/translations across releases.
+    parts = name.lower().replace("\\", "/").split("/")
+    return parts[-1].endswith(".qm") and "translations" in parts[:-1]
+
+
+TRIM_RULES = (
+    ("Qt software OpenGL rasterizer", _is_software_opengl),
+    ("Qt UI translations", _is_qt_translation),
+)
+
+
+def trim_toc(toc, rules=TRIM_RULES):
+    """Split one PyInstaller TOC into (kept, {rule label: [dropped entries]})."""
+    kept, dropped = [], {label: [] for label, _ in rules}
+    for entry in toc:
+        for label, matches in rules:
+            if matches(entry[0]):
+                dropped[label].append(entry)
+                break
+        else:
+            kept.append(entry)
+    return kept, dropped
+
+
+def trim_analyses(analyses, rules=TRIM_RULES):
+    """Trim both TOCs of every Analysis in place; return the per-rule drop counts.
+
+    Raises if any rule matched nothing anywhere. A filter that silently matches
+    zero entries still "succeeds" — it just saves 0 MB — so a future PySide6
+    layout change has to fail the build loudly here instead of quietly putting
+    26 MB back into the installer that nobody notices for three releases.
+    """
+    total = {label: 0 for label, _ in rules}
+    for analysis in analyses:
+        for attr in ("binaries", "datas"):
+            toc = getattr(analysis, attr)
+            kept, dropped = trim_toc(toc, rules)
+            setattr(analysis, attr, type(toc)(kept))
+            for label, entries in dropped.items():
+                total[label] += len(entries)
+    idle = [label for label, n in total.items() if not n]
+    if idle:
+        raise SystemExit(
+            "livecaptions.spec: trim rule(s) matched no TOC entry: "
+            + "; ".join(idle)
+            + ". PySide6 has moved its payload — fix the rule in TRIM_RULES (and "
+              "tests/test_spec_trim.py) rather than deleting it.")
+    return total
+
+
 _common = dict(
     pathex=[SRC],
     binaries=binaries,
@@ -150,6 +220,10 @@ _common = dict(
 
 a_cli = Analysis([os.path.join(PKG, "cli_launch.py")], **_common)      # noqa: F821
 a_gui = Analysis([os.path.join(PKG, "overlay_launch.py")], **_common)  # noqa: F821
+
+_trimmed = trim_analyses((a_cli, a_gui))
+print("livecaptions.spec: trimmed "
+      + ", ".join(f"{n} x {label}" for label, n in _trimmed.items()))
 
 pyz_cli = PYZ(a_cli.pure)   # noqa: F821
 pyz_gui = PYZ(a_gui.pure)   # noqa: F821

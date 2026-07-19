@@ -125,6 +125,11 @@ def probe_hotkey(spec: str) -> str:
         return "unknown"
 
 
+def _fmt(value: float) -> str:
+    """Numbers as a person writes them: 40 not 40.0, 2.5 not 2.500000."""
+    return f"{value:g}"
+
+
 def _hint(text: str) -> QtWidgets.QLabel:
     lbl = QtWidgets.QLabel(text)
     lbl.setWordWrap(True)
@@ -153,11 +158,19 @@ class AdvancedTab(QtWidgets.QWidget):
         self._settings = settings
         self._on_restart = on_restart
         self._registered = dict(registered or {})
-        self._loading = False           # suppress persistence while we set widgets
+        # What each registration result was measured against. A remap makes the
+        # result meaningless, and a stale "Working now." against a combo the app
+        # never tried is worse than saying nothing.
+        self._registered_specs: Dict[str, str] = {
+            field: str(getattr(settings, field, model_default(field)))
+            for field in self._registered}
+        self._loading = True            # suppress persistence while we set widgets
         self._pending_restart: Optional[str] = None
         self._hotkey_edits: Dict[str, QtWidgets.QLineEdit] = {}
         self._hotkey_notes: Dict[str, QtWidgets.QLabel] = {}
         self._probed = False
+        #: values found on disk that no widget can represent, reported not hidden
+        self._out_of_range: List[str] = []
 
         self._restart_timer = QtCore.QTimer(self)
         self._restart_timer.setSingleShot(True)
@@ -179,19 +192,66 @@ class AdvancedTab(QtWidgets.QWidget):
         scroll.setWidget(page)
         outer.addWidget(scroll)
 
+        self._range_note = QtWidgets.QLabel("")
+        self._range_note.setWordWrap(True)
+        self._range_note.setStyleSheet("color: #c04a3a; font-size: 11px;")
+        self._range_note.setVisible(False)
+        outer.addWidget(self._range_note)
+
         self._note = QtWidgets.QLabel("")
         self._note.setWordWrap(True)
         self._note.setStyleSheet("color: #d08a30;")
         outer.addWidget(self._note)
 
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(_hint("Everything here saves as you change it."), 1)
+        # The window footer already says settings save as you change them; repeating
+        # it directly above that line just looks like a rendering bug.
+        row.addWidget(_hint("Changing recognition settings restarts captions."), 1)
         reset = QtWidgets.QPushButton("Reset to defaults")
         reset.clicked.connect(self._on_reset)
         row.addWidget(reset)
         outer.addLayout(row)
 
+        self._loading = False
+        self._show_out_of_range()
         self._check_buffer_vs_line()
+
+    # ---- values the widgets were not built for -----------------------------
+    def _fit_spin(self, widget, value: float, label: str, unit: str = ""):
+        """Widen `widget` so it can show `value`, and remember that it had to.
+
+        Clamping to the widget's range would put a number on screen that is not
+        the number the pipeline is running with, and the user believes the screen.
+        """
+        lo, hi = widget.minimum(), widget.maximum()
+        if lo <= value <= hi:
+            return value
+        self._out_of_range.append(
+            f"{label} is {_fmt(value)}{unit}, outside the supported "
+            f"{_fmt(lo)}{unit}–{_fmt(hi)}{unit}")
+        widget.setRange(min(lo, value), max(hi, value))
+        return value
+
+    def _fit_choice(self, combo: QtWidgets.QComboBox, value: str, label: str,
+                    allowed: List[str]) -> str:
+        """Same for a fixed list: an unknown value is added so it can be shown."""
+        if value in allowed:
+            return value
+        self._out_of_range.append(
+            f"{label} is “{value}”, which is not one of {', '.join(allowed)}")
+        combo.addItem(value)
+        return value
+
+    def _show_out_of_range(self) -> None:
+        if not self._out_of_range:
+            self._range_note.setVisible(False)
+            self._range_note.setText("")
+            return
+        self._range_note.setVisible(True)
+        self._range_note.setText(
+            "Your config file has values this app was not tuned for, shown here "
+            "exactly as the app is using them: " + "; ".join(self._out_of_range)
+            + ". They keep working; pick a supported value if something misbehaves.")
 
     # ---- persistence -------------------------------------------------------
     def _persist(self, **kw) -> None:
@@ -247,7 +307,8 @@ class AdvancedTab(QtWidgets.QWidget):
 
         self._beam = QtWidgets.QSpinBox()
         self._beam.setRange(1, 10)
-        self._beam.setValue(int(getattr(self._settings, "beam_size", 1) or 1))
+        self._beam.setValue(int(self._fit_spin(
+            self._beam, int(getattr(self._settings, "beam_size", 1) or 1), "Beam size")))
         self._beam.valueChanged.connect(
             lambda v: self._persist_and_rebuild("beam size", beam_size=int(v)))
         form.addRow("Beam size:", self._beam)
@@ -258,14 +319,18 @@ class AdvancedTab(QtWidgets.QWidget):
 
         self._gpu = QtWidgets.QComboBox()
         self._gpu.addItems(_GPU_COMPUTE)
-        self._gpu.setCurrentText(str(getattr(self._settings, "gpu_compute", "float16")))
+        self._gpu.setCurrentText(self._fit_choice(
+            self._gpu, str(getattr(self._settings, "gpu_compute", "float16")),
+            "GPU precision", _GPU_COMPUTE))
         self._gpu.currentTextChanged.connect(
             lambda t: self._persist_and_rebuild("GPU precision", gpu_compute=t))
         form.addRow("GPU precision:", self._gpu)
 
         self._cpu = QtWidgets.QComboBox()
         self._cpu.addItems(_CPU_COMPUTE)
-        self._cpu.setCurrentText(str(getattr(self._settings, "cpu_compute", "int8")))
+        self._cpu.setCurrentText(self._fit_choice(
+            self._cpu, str(getattr(self._settings, "cpu_compute", "int8")),
+            "CPU precision", _CPU_COMPUTE))
         self._cpu.currentTextChanged.connect(
             lambda t: self._persist_and_rebuild("CPU precision", cpu_compute=t))
         form.addRow("CPU precision:", self._cpu)
@@ -280,7 +345,9 @@ class AdvancedTab(QtWidgets.QWidget):
         self._block.setSingleStep(0.02)
         self._block.setDecimals(2)
         self._block.setSuffix(" s")
-        self._block.setValue(float(getattr(self._settings, "block_sec", 0.1)))
+        self._block.setValue(self._fit_spin(
+            self._block, float(getattr(self._settings, "block_sec", 0.1)),
+            "Audio block", " s"))
         self._block.valueChanged.connect(
             lambda v: self._persist_and_rebuild("audio block size", block_sec=float(v)))
         form.addRow("Audio block:", self._block)
@@ -292,7 +359,9 @@ class AdvancedTab(QtWidgets.QWidget):
         self._floor = QtWidgets.QDoubleSpinBox()
         self._floor.setRange(0.0, 1000.0)
         self._floor.setDecimals(1)
-        self._floor.setValue(float(getattr(self._settings, "silence_rms_floor", 5.0)))
+        self._floor.setValue(self._fit_spin(
+            self._floor, float(getattr(self._settings, "silence_rms_floor", 5.0)),
+            "Silence floor"))
         self._floor.valueChanged.connect(
             lambda v: self._persist_and_rebuild("silence floor", silence_rms_floor=float(v)))
         form.addRow("Silence floor:", self._floor)
@@ -304,14 +373,17 @@ class AdvancedTab(QtWidgets.QWidget):
 
     def _on_language(self) -> None:
         code = self._lang.currentText().strip().lower()
+        stored = str(getattr(self._settings, "language", "en") or "en")
         if not _valid_language(code):
             self._lang_note.setText(
                 f"“{code}” is not a language Whisper knows — keeping "
-                f"{getattr(self._settings, 'language', 'en')}. Use a code like en, de, ja.")
+                f"{stored}. Use a code like en, de, ja.")
             self._lang_note.setStyleSheet("color: #c04a3a; font-size: 11px;")
+            # Leaving the rejected text on screen claims a language nobody stored.
+            self._lang.setCurrentText(stored)
             return
         self._lang_note.setStyleSheet("color: gray; font-size: 11px;")
-        if code != str(getattr(self._settings, "language", "en") or ""):
+        if code != stored:
             self._persist_and_rebuild("language", language=code)
 
     # ---- streaming ---------------------------------------------------------
@@ -325,7 +397,9 @@ class AdvancedTab(QtWidgets.QWidget):
             w.setSingleStep(step)
             w.setDecimals(2)
             w.setSuffix(" s")
-            w.setValue(float(getattr(self._settings, field, model_default(field))))
+            w.setValue(self._fit_spin(
+                w, float(getattr(self._settings, field, model_default(field))),
+                what.capitalize(), " s"))
             w.valueChanged.connect(
                 lambda v, f=field, n=what: self._on_stream_value(f, n, float(v)))
             return w
@@ -363,7 +437,9 @@ class AdvancedTab(QtWidgets.QWidget):
         self._vad.setRange(0.05, 0.95)
         self._vad.setSingleStep(0.05)
         self._vad.setDecimals(2)
-        self._vad.setValue(float(getattr(self._settings, "stream_vad_threshold", 0.5)))
+        self._vad.setValue(self._fit_spin(
+            self._vad, float(getattr(self._settings, "stream_vad_threshold", 0.5)),
+            "Speech threshold"))
         self._vad.valueChanged.connect(
             lambda v: self._on_stream_value("stream_vad_threshold", "speech threshold", float(v)))
         form.addRow("Speech threshold:", self._vad)
@@ -418,11 +494,16 @@ class AdvancedTab(QtWidgets.QWidget):
             row.addWidget(note)
             form.addRow(f"{label}:", row)
         v.addLayout(form)
+        # setChecked(False) on an already-unchecked box emits nothing, so launching
+        # with hotkeys off would otherwise leave every field editable.
+        self._apply_hotkeys_enabled(self._hk_enabled.isChecked())
 
         self._nudge = QtWidgets.QSpinBox()
         self._nudge.setRange(1, 500)
         self._nudge.setSuffix(" px")
-        self._nudge.setValue(int(getattr(self._settings, "hotkey_nudge_px", 40)))
+        self._nudge.setValue(int(self._fit_spin(
+            self._nudge, int(getattr(self._settings, "hotkey_nudge_px", 40)),
+            "Move step", " px")))
         self._nudge.valueChanged.connect(self._on_nudge)
         nrow = QtWidgets.QFormLayout()
         nrow.addRow("Move step:", self._nudge)
@@ -437,10 +518,13 @@ class AdvancedTab(QtWidgets.QWidget):
         v.addWidget(self._hk_status)
         return g
 
+    def _apply_hotkeys_enabled(self, on: bool) -> None:
+        for edit in self._hotkey_edits.values():
+            edit.setEnabled(bool(on))
+
     def _on_hotkeys_enabled(self, on: bool) -> None:
         self._persist(hotkeys_enabled=bool(on))
-        for edit in self._hotkey_edits.values():
-            edit.setEnabled(on)
+        self._apply_hotkeys_enabled(on)
         if not self._loading:
             self._needs_app_restart("Turning hotkeys "
                                     + ("on" if on else "off"))
@@ -480,10 +564,15 @@ class AdvancedTab(QtWidgets.QWidget):
         self.refresh_hotkey_status()
 
     def _other_action_using(self, field: str, spec: str) -> Optional[str]:
+        """Compare what Windows sees, not what was typed: hotkeys.py maps both
+        'esc' and 'escape' onto vk 0x1B, so string equality lets the same physical
+        combination be assigned to two actions."""
+        mine = _combo_id(spec)
         for other, label in _HOTKEY_ACTIONS:
             if other == field:
                 continue
-            if str(getattr(self._settings, other, "")).strip().lower() == spec:
+            theirs = _combo_id(str(getattr(self._settings, other, "")))
+            if mine is not None and theirs == mine:
                 return label
         return None
 
@@ -493,18 +582,44 @@ class AdvancedTab(QtWidgets.QWidget):
             self._probed = True
             self.refresh_hotkey_status()
 
+    def _shown_spec(self, field: str) -> Tuple[str, bool]:
+        """The combo the user is looking at, and whether it is usable at all.
+
+        Status has to describe what is on screen. The stored value can lag the
+        box (nothing is written until the combo validates), and reporting against
+        the stored one is how a result for the old combo ends up under the new.
+        """
+        stored = str(getattr(self._settings, field, model_default(field)))
+        edit = self._hotkey_edits.get(field)
+        if edit is None:
+            return stored, True
+        try:
+            return normalize_hotkey(edit.text()), True
+        except ValueError:
+            return edit.text().strip(), False
+
     def refresh_hotkey_status(self) -> None:
         """Say which combos are unavailable, because the failure is otherwise
         invisible: the app prints 'already claimed' to a console nobody sees."""
         taken: List[str] = []
         for field, label in _HOTKEY_ACTIONS:
-            spec = str(getattr(self._settings, field, model_default(field)))
+            spec, usable = self._shown_spec(field)
             note = self._hotkey_notes[field]
-            if self._registered.get(field) is True:
+            if not usable:
+                # Don't probe, and above all don't leave the previous verdict
+                # standing next to a combo it was never measured against.
+                note.setText("Not checked — finish typing a usable combination.")
+                note.setStyleSheet("color: #d08a30; font-size: 11px;")
+                continue
+            # A registration result is only about the combo it was tried with.
+            live = (self._registered.get(field)
+                    if _combo_id(self._registered_specs.get(field, "")) == _combo_id(spec)
+                    else None)
+            if live is True:
                 note.setText("Working now.")
                 note.setStyleSheet("color: #3a8a4a; font-size: 11px;")
                 continue
-            if self._registered.get(field) is False:
+            if live is False:
                 note.setText("Not working — another app has this combination.")
                 note.setStyleSheet("color: #c04a3a; font-size: 11px;")
                 taken.append(f"{label} ({spec})")
@@ -575,9 +690,19 @@ class AdvancedTab(QtWidgets.QWidget):
             self._nudge.setValue(int(s.hotkey_nudge_px))
             for field, _ in _HOTKEY_ACTIONS:
                 self._hotkey_edits[field].setText(str(getattr(s, field)))
+            self._apply_hotkeys_enabled(bool(s.hotkeys_enabled))
         finally:
             self._loading = False
         self._check_buffer_vs_line()
+
+
+def _combo_id(spec: str) -> Optional[Tuple[int, int]]:
+    """(modifiers, virtual-key) — the identity Windows actually registers on,
+    or None when the combo cannot be parsed at all."""
+    try:
+        return parse_hotkey(spec)
+    except ValueError:
+        return None
 
 
 def _valid_language(code: str) -> bool:

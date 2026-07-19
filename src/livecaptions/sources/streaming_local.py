@@ -113,6 +113,7 @@ class StreamingTranscriptionSource(TranscriptionSource):
         self._thread = None
         self._audio_error: Optional[BaseException] = None
         self._stream_time = 0.0        # total 16k audio fed — the shared global clock
+        self._recorder = None       # set by attach_recorder() when saving is on
         self._gain = None
         if getattr(settings, "auto_gain", True):
             from ..capture.gain import AutoGain
@@ -196,6 +197,10 @@ class StreamingTranscriptionSource(TranscriptionSource):
                     self._monitor(Segmenter.block_rms(b.samples))
                 chunk = self._resampler.resample_chunk(b.samples.astype(np.float32))
                 if chunk.size:
+                    if self._recorder is not None:
+                        # Record BEFORE auto-gain: the saved WAV should be what was
+                        # actually played, not what we amplified for the recogniser.
+                        self._recorder.write(chunk)
                     if self._gain is not None:
                         # After resampling, before the VAD: Windows already applied the
                         # output volume, so turning the speakers down otherwise drops
@@ -264,6 +269,13 @@ class StreamingTranscriptionSource(TranscriptionSource):
             print(f"Audio capture failed: {self._audio_error}")
         self.finished.set()
 
+    def attach_recorder(self, recorder) -> None:
+        """Keep the captured audio, so the session can be re-diarized later at
+        better quality than the live pass manages."""
+        self._recorder = recorder
+
     def stop(self) -> None:
         self._audio.stop()
         self._block_q.put(None)
+        if self._recorder is not None:
+            self._recorder.stop()      # finalises the WAV header

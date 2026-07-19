@@ -434,6 +434,11 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     tray = None
     settings_win = {"w": None}
 
+    # Which hotkeys actually registered. On a machine where another app already owns
+    # ctrl+alt+*, every one of these is False — the Advanced tab shows that instead of
+    # leaving the user to wonder why nothing happens.
+    registered: dict = {}
+
     def _open_settings():
         from .settings import SettingsWindow
         if settings_win["w"] is None:
@@ -441,7 +446,8 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
             # applies device/model/speaker changes live (no restart).
             settings_win["w"] = SettingsWindow(settings, overlay, quit_on_close=True,
                                                on_restart=_restart_pipeline,
-                                               transport=transport)
+                                               transport=transport,
+                                               registered=registered)
         settings_win["w"].show()
         settings_win["w"].raise_()
         settings_win["w"].activateWindow()
@@ -471,6 +477,10 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
             hotkeys.register(settings.hotkey_up, lambda: overlay.nudge(0, -px), "move up"),
             hotkeys.register(settings.hotkey_down, lambda: overlay.nudge(0, px), "move down"),
         ]
+        registered.update(zip(
+            ("hotkey_toggle", "hotkey_pause", "hotkey_quit", "hotkey_left",
+             "hotkey_right", "hotkey_up", "hotkey_down"),
+            (bool(b) for b in bound)))
         if any(bound):
             print(f"Hotkeys: {settings.hotkey_toggle} show/hide, {settings.hotkey_pause} pause, "
                   f"{settings.hotkey_quit} quit, ctrl+alt+arrows move")

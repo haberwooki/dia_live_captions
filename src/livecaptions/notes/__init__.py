@@ -10,6 +10,8 @@ session, so they survive a restart and can be regenerated at any time.
 """
 from .generate import (
     ConsentRequired,
+    NotesNotStored,
+    NotesUnreadable,
     SessionNotes,
     StoredNotes,
     ToDo,
@@ -17,6 +19,7 @@ from .generate import (
     ensure_schema,
     generate_notes,
     load_notes,
+    payload_chars,
     privacy_notice,
     save_notes,
     to_markdown,
@@ -24,6 +27,8 @@ from .generate import (
 
 __all__ = [
     "ConsentRequired",
+    "NotesNotStored",
+    "NotesUnreadable",
     "SessionNotes",
     "StoredNotes",
     "ToDo",
@@ -31,6 +36,7 @@ __all__ = [
     "ensure_schema",
     "generate_notes",
     "load_notes",
+    "payload_chars",
     "privacy_notice",
     "save_notes",
     "to_markdown",

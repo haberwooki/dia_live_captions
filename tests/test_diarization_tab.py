@@ -8,9 +8,11 @@ widget is touched from the worker thread (which would crash Qt, not just look
 wrong).
 """
 import os
+import sqlite3
 import threading
 import time
 import wave
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,6 +146,32 @@ def test_audio_lookup_finds_a_session_named_wav(env):
     assert dmod.session_audio_path(env["settings"], 7) == p
 
 
+def test_finds_audio_where_the_recorder_actually_writes_it(env):
+    """With `audio_save_dir` unset — the default — the tab must look in the
+    recorder's DB-derived directory, not a directory of its own invention."""
+    from livecaptions.capture import recorder
+    settings = SimpleNamespace()            # a plain object: no audio_save_dir at all
+    wav = _write_wav(recorder.session_audio_path(1))
+
+    assert dmod.audio_dir(settings) == recorder.audio_dir(), \
+        "the tab searches a different folder than the recorder writes to"
+    assert dmod.session_audio_path(settings, 1) == wav
+
+
+def test_configured_audio_dir_works_on_a_plain_settings_object(env):
+    """Production passes the real Settings, not a test subclass; the configured
+    branch has to work through a bare attribute, and has to prefer exactly the
+    name the recorder writes."""
+    from livecaptions.capture import recorder
+    settings = SimpleNamespace(audio_save_dir=str(env["audio"]))
+    theirs = _write_wav(env["audio"] / recorder.session_audio_path(5).name)
+    _write_wav(env["audio"] / "session-5.wav")     # a lookalike from some other tool
+
+    assert dmod.audio_dir(settings) == env["audio"]
+    assert dmod.session_audio_path(settings, 5) == theirs, \
+        "picked a lookalike over the file the recorder actually wrote"
+
+
 # ---- writeback ----
 
 def test_writeback_only_touches_the_chosen_session(env):
@@ -153,7 +181,9 @@ def test_writeback_only_touches_the_chosen_session(env):
         SpeakerTurn(0.0, 1.1, "SPEAKER_00"),
         SpeakerTurn(1.1, 5.0, "SPEAKER_01"),
     ])
-    assert changed == 3
+    # 3 lines are attributed, but the first was already SPEAKER_00 and is left as
+    # it is: the count is what actually changed, not what was matched.
+    assert changed == 2
     got = {(r["session_id"], r["t_start"]): r["speaker"]
            for r in conn.execute("SELECT session_id,t_start,speaker FROM utterances")}
     assert got[(1, 0.0)] == "SPEAKER_00"
@@ -171,6 +201,18 @@ def test_writeback_leaves_lines_no_turn_covers(env):
     speakers = [r["speaker"] for r in
                 conn.execute("SELECT speaker FROM utterances WHERE session_id=1")]
     assert all(speakers), "a line lost its speaker entirely"
+
+
+def test_rerunning_the_same_labels_reports_nothing_changed(env):
+    """The count is shown to the user as "Relabelled N line(s)". UPDATE's rowcount
+    counts rows MATCHED, so re-diarizing to the labels already stored used to
+    claim every line had been rewritten."""
+    from livecaptions.diarize.base import SpeakerTurn
+    turns = [SpeakerTurn(0.0, 1.1, "SPEAKER_00"), SpeakerTurn(1.1, 5.0, "SPEAKER_01")]
+    conn = db_mod.connect(env["db"])
+    assert dmod.apply_speakers(conn, 1, turns) == 2
+    assert dmod.apply_speakers(conn, 1, turns) == 0, \
+        "a pass that changed nothing reported relabelled lines"
 
 
 # ---- the worker ----
@@ -207,7 +249,7 @@ def test_full_run_relabels_the_session_from_the_worker(tab, env, monkeypatch):
         == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_01"]
     assert [r["speaker"] for r in
             conn.execute("SELECT speaker FROM utterances WHERE session_id=2")] == ["Dana"]
-    assert "Relabelled 3 line(s)" in tab._status.text()
+    assert "Relabelled 2 line(s)" in tab._status.text()   # the third line was already right
 
 
 def test_no_widget_is_touched_from_the_worker_thread(tab, env, monkeypatch):
@@ -246,6 +288,8 @@ def test_cancelling_writes_nothing(tab, env, monkeypatch):
     released = threading.Event()
 
     def slow(req, settings, progress, cancelled):
+        # The uninterruptible phase (Whisper, then the diarizer), followed by the
+        # checkpoint run_offline_pass really does have at line ~159.
         released.wait(5)
         if cancelled():
             raise dmod.Cancelled()
@@ -262,6 +306,42 @@ def test_cancelling_writes_nothing(tab, env, monkeypatch):
     speakers = {r["speaker"] for r in
                 tab._ensure().execute("SELECT speaker FROM utterances WHERE session_id=1")}
     assert speakers == {"SPEAKER_00"}, "a cancelled pass still rewrote the transcript"
+    assert "unchanged" in tab._status.text()
+
+
+def test_cancelling_after_the_workers_last_checkpoint_writes_nothing(tab, env, monkeypatch):
+    """_on_cancel promises "nothing will be written to the transcript". The worker
+    has no checkpoint left after its final one, so a Cancel pressed in the window
+    between that check and the writeback arrives with a *successful* payload —
+    and the writeback happens on the GUI thread, well after the worker is done."""
+    _write_wav(env["audio"] / "session-1.wav")
+    tab._load_sessions()
+    tab._sessions.setCurrentIndex(_index_of(tab, 1))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes))
+
+    past_last_checkpoint = threading.Event()
+    released = threading.Event()
+
+    def slow(req, settings, progress, cancelled):
+        if cancelled():
+            raise dmod.Cancelled()
+        past_last_checkpoint.set()
+        released.wait(5)          # nothing after this can observe a cancel
+        return {"session": req.session_id, "speakers": 1,
+                "segments": [SpeakerSegment(0.0, 5.0, "REDIARIZED", "a")]}
+    monkeypatch.setattr(dmod, "run_offline_pass", slow)
+
+    tab._on_run()
+    assert past_last_checkpoint.wait(5), "the worker never started"
+    tab._on_cancel()
+    released.set()
+    assert _pump(lambda: not tab._running)
+
+    speakers = {r["speaker"] for r in
+                tab._ensure().execute("SELECT speaker FROM utterances WHERE session_id=1")}
+    assert speakers == {"SPEAKER_00"}, \
+        f"transcript WAS rewritten after Cancel: {speakers}"
     assert "unchanged" in tab._status.text()
 
 
@@ -296,12 +376,25 @@ def test_a_failing_pass_reports_instead_of_hanging(tab, env, monkeypatch):
     assert tab._run.isEnabled(), "the tab stayed locked after a failure"
 
 
-def test_cancel_is_checked_before_any_model_loads(env):
-    """Cancelling before the first checkpoint must not pay for a model load."""
+def test_cancel_is_checked_before_any_model_loads(env, monkeypatch):
+    """Cancelling before the first checkpoint must not pay for a model load.
+
+    pytest.raises(Cancelled) alone cannot tell "stopped before the load" from
+    "stopped at the *next* checkpoint, seconds later, having loaded Whisper from
+    cache" — so the load itself is what fails this test."""
+    from livecaptions.asr import whisper as whisper_mod
+    loads = []
+
+    def must_not_load(*a, **k):
+        loads.append(1)
+        raise AssertionError("a pre-cancelled run still loaded the speech model")
+    monkeypatch.setattr(whisper_mod, "load_model", must_not_load)
+
     with pytest.raises(dmod.Cancelled):
         dmod.run_offline_pass(
             dmod.DiarizeRequest(1, "nope.wav", "sherpa", -1),
             env["settings"], lambda _m: None, lambda: True)
+    assert not loads
 
 
 # ---- settings + legend ----
@@ -328,3 +421,24 @@ def test_legend_maps_a_colour_per_speaker_in_first_heard_order(env, tab):
     assert len(swatches) == 2, "each speaker needs its own colour swatch"
     names = [w.text() for w in tab.findChildren(QtWidgets.QLabel)]
     assert "SPEAKER_01" in names and "SPEAKER_00" in names
+
+
+def test_a_legend_that_cannot_be_read_says_so_instead_of_saying_empty(tab, monkeypatch):
+    """"That session has no speaker labels" would send the user off to re-diarize
+    a session that is almost certainly labelled fine."""
+    def boom(conn, session_id):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(dmod, "speaker_order", boom)
+
+    tab._refresh_legend(1)
+    text = tab._legend_empty.text()
+    assert "database is locked" in text, f"the read failure was swallowed: {text!r}"
+    assert "no speaker labels" not in text, "a DB error was reported as emptiness"
+
+
+def test_closing_the_tab_closes_its_database_handle(tab):
+    conn = tab._ensure()
+    tab.close()
+    assert tab._conn is None, "the tab kept its sqlite handle after closing"
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")

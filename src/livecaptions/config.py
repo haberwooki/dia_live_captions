@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # last time, so start". "always" / "never" pin it either way.
     save_transcripts: bool = True         # write sessions to the local store (never uploaded)
 
+    # Keeping the audio lets a session be re-diarized later at much better quality
+    # than the live pass manages. Off by default: it is raw recordings of private
+    # conversations, and ~115 MB per hour.
+    save_audio: bool = False
+    audio_save_dir: str = ""              # blank = <app data>/audio
+    audio_max_mb: int = 2048              # stop recording rather than fill the disk
+    notes_max_chars: int = 120_000        # transcript budget for summaries/to-dos
+
     # Optional AI helper (speaker naming; later, summaries). Off by default, because
     # a non-local provider is the only thing here that sends data off the machine.
     # NOTE: no api_key field, deliberately — keys live in Windows Credential Manager

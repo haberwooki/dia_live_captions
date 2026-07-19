@@ -5,6 +5,9 @@ it, a real playable WAV of the right length, a cap that stops instead of filling
 the disk, a file that survives the app being killed, and deletion that frees the
 space it says it does.
 """
+import struct
+import threading
+import time
 import wave
 
 import numpy as np
@@ -112,10 +115,93 @@ def test_a_killed_app_still_leaves_a_readable_wav(tmp_path):
 
 
 def test_a_kill_before_any_audio_still_leaves_a_valid_wav(tmp_path):
-    R.SessionRecorder(tmp_path / "e.wav")           # opened, never written to, never closed
-    params, samples = read_wav(tmp_path / "e.wav")
-    assert (params.nframes, len(samples)) == (0, 0)
-    assert params.framerate == 16000
+    rec = R.SessionRecorder(tmp_path / "e.wav")     # opened, never written to
+    try:
+        params, samples = read_wav(tmp_path / "e.wav")   # read while still open
+        assert (params.nframes, len(samples)) == (0, 0)
+        assert params.framerate == 16000
+    finally:
+        rec.stop()
+
+
+def _kill_mid_write(src, dest, frames_in_header=0):
+    """A WAV as a process kill leaves it: every frame on disk, header sizes stale.
+
+    `wave` patches the sizes after writing the frames, so the window where a kill
+    lands is exactly this — bytes present, sizes describing an earlier moment.
+    """
+    raw = bytearray(src.read_bytes())
+    stale = frames_in_header * R.SAMPLE_WIDTH
+    struct.pack_into("<I", raw, 4, R.HEADER_BYTES - 8 + stale)
+    struct.pack_into("<I", raw, 40, stale)
+    dest.write_bytes(bytes(raw))
+
+
+def test_audio_killed_mid_write_is_recovered_whole_not_just_readable(tmp_path):
+    """The promise is a valid WAV OF THE RIGHT DURATION, not a valid empty one."""
+    source = tmp_path / "source.wav"
+    with R.SessionRecorder(source) as rec:
+        for _ in range(10):
+            rec.write(tone(0.2))                    # 2.0 s written and flushed
+
+    killed = R.session_audio_path(31)
+    killed.parent.mkdir(parents=True, exist_ok=True)
+    _kill_mid_write(source, killed, frames_in_header=0)   # patch never landed at all
+    assert read_wav(killed)[0].nframes == 0, "test setup did not actually stale the header"
+
+    found = R.find_session_audio(31)
+    params, samples = read_wav(found)
+    assert params.nframes == pytest.approx(2.0 * R.SAMPLE_RATE)
+    assert params.nframes / params.framerate == pytest.approx(2.0)
+    assert len(samples) == params.nframes, "header claims more audio than the file holds"
+    assert np.abs(samples).max() > 16000, "recovered silence instead of the audio"
+
+
+def test_a_partially_stale_header_recovers_only_the_lost_tail(tmp_path):
+    source = tmp_path / "source2.wav"
+    with R.SessionRecorder(source) as rec:
+        rec.write(tone(1.0))
+
+    killed = R.session_audio_path(32)
+    killed.parent.mkdir(parents=True, exist_ok=True)
+    _kill_mid_write(source, killed, frames_in_header=R.SAMPLE_RATE // 2)   # half patched
+    assert R.repair_wav_header(killed) == R.SAMPLE_RATE // 2      # frames recovered
+    assert read_wav(killed)[0].nframes == R.SAMPLE_RATE
+    assert R.repair_wav_header(killed) == 0, "repaired an already-correct header"
+
+
+def test_repair_never_grows_a_header_beyond_the_bytes_present(tmp_path):
+    """Over-counting is the one failure that makes a WAV unreadable, not just short."""
+    path = tmp_path / "torn.wav"
+    with R.SessionRecorder(path) as rec:
+        rec.write(tone(0.3))
+    with open(path, "r+b") as fh:                   # a torn final frame, as a kill leaves it
+        fh.truncate(path.stat().st_size + 1 - 2)
+        fh.seek(40)
+        fh.write(struct.pack("<I", 0))
+
+    R.repair_wav_header(path)
+    params, samples = read_wav(path)
+    assert len(samples) == params.nframes
+    assert params.nframes * R.SAMPLE_WIDTH + R.HEADER_BYTES <= path.stat().st_size
+
+
+def test_repair_leaves_a_healthy_file_untouched(tmp_path):
+    path = tmp_path / "healthy.wav"
+    with R.SessionRecorder(path) as rec:
+        rec.write(tone(0.4))
+    before = path.read_bytes()
+    assert R.repair_wav_header(path) == 0
+    assert path.read_bytes() == before
+
+
+def test_repair_ignores_files_it_does_not_understand(tmp_path):
+    junk = tmp_path / "notaudio.wav"
+    junk.write_bytes(b"this is not a RIFF file at all, not even nearly, no")
+    before = junk.read_bytes()
+    assert R.repair_wav_header(junk) == 0
+    assert junk.read_bytes() == before
+    assert R.repair_wav_header(tmp_path / "missing.wav") == 0
 
 
 def test_the_cap_stops_recording_and_says_so(tmp_path):
@@ -214,6 +300,75 @@ def test_int16_input_is_accepted(tmp_path):
     assert read_wav(path)[0].nframes == 200
 
 
+def test_stereo_is_refused_instead_of_saved_at_double_speed(tmp_path):
+    """Interleaved stereo written as mono halves the duration of everything after it."""
+    path = tmp_path / "o.wav"
+    rec = R.SessionRecorder(path)
+    rec.write(tone(0.5))
+    stereo = np.stack([tone(0.5), tone(0.5, freq=880.0)], axis=1)
+    assert stereo.shape == (0.5 * R.SAMPLE_RATE, 2)
+
+    assert rec.write(stereo) is False               # no exception into the audio thread
+    assert rec.stopped and "mono" in rec.stop_reason
+    rec.stop()
+    params, _ = read_wav(path)
+    assert params.nframes == 0.5 * R.SAMPLE_RATE, "stereo frames landed in the file"
+
+
+def test_mono_shaped_as_a_column_is_accepted(tmp_path):
+    """sounddevice hands single-channel blocks back as (N, 1)."""
+    path = tmp_path / "p.wav"
+    with R.SessionRecorder(path) as rec:
+        assert rec.write(tone(0.25).reshape(-1, 1)) is True
+    assert read_wav(path)[0].nframes == 0.25 * R.SAMPLE_RATE
+
+
+def test_an_unconvertible_chunk_stops_recording_without_raising(tmp_path):
+    """The audio thread has no handler of its own; conversion runs before any I/O."""
+    path = tmp_path / "q.wav"
+    rec = R.SessionRecorder(path)
+    rec.write(tone(0.2))
+
+    assert rec.write(np.array(["not", "audio"])) is False
+    assert rec.stopped and rec.stop_reason
+    assert read_wav(path)[0].nframes == 0.2 * R.SAMPLE_RATE, "audio before the bad chunk lost"
+
+
+def test_stop_does_not_block_behind_a_stalled_write(tmp_path):
+    """stop() runs on the GUI thread; a hung disk must not freeze the window."""
+    rec = R.SessionRecorder(tmp_path / "r.wav")
+    entered, release = threading.Event(), threading.Event()
+    real = rec._wav.writeframes
+
+    def stalls(data):
+        entered.set()
+        release.wait(10)
+        return real(data)
+
+    rec._wav.writeframes = stalls
+    writer = threading.Thread(target=rec.write, args=(tone(0.3),), daemon=True)
+    writer.start()
+    assert entered.wait(5), "writer never reached the stalled write"
+
+    began = time.perf_counter()
+    rec.stop("user stopped recording")
+    elapsed = time.perf_counter() - began
+
+    release.set()
+    writer.join(10)
+    assert elapsed < 2.0, f"stop() blocked {elapsed:.1f}s behind the stalled write"
+    assert rec.stopped and rec.stop_reason == "user stopped recording"
+    assert read_wav(tmp_path / "r.wav")[0].nframes == 0.3 * R.SAMPLE_RATE
+
+
+def test_orphan_audio_is_documented_until_deletion_is_wired_up(tmp_path):
+    """Deleting a transcript leaves its voices on disk; that must not go unsaid."""
+    doc = R.__doc__.lower()
+    assert "orphan" in doc
+    assert "delete_session_audio" in doc
+    assert "no callers" in doc
+
+
 def test_totals_and_deletion(tmp_path):
     for sid, secs in ((1, 1.0), (2, 2.0), (3, 0.5)):
         with R.SessionRecorder(R.session_audio_path(sid), session_id=sid) as rec:
@@ -224,11 +379,26 @@ def test_totals_and_deletion(tmp_path):
     assert len(R.audio_files()) == 3
 
     freed = R.session_audio_path(2).stat().st_size
-    assert R.delete_session_audio(2) is True
+    assert R.delete_session_audio(2) == (True, "")
     assert R.find_session_audio(2) is None
     assert R.total_audio_bytes() == expected - freed
-    assert R.delete_session_audio(2) is False, "reported deleting a file that was gone"
-    assert R.delete_session_audio(99) is False
+    assert R.delete_session_audio(2) == (False, ""), "reported deleting a file that was gone"
+    assert R.delete_session_audio(99) == (False, "")
+
+
+def test_a_failed_deletion_is_returned_not_printed(tmp_path, monkeypatch, capsys):
+    """print() goes nowhere in the windowed build, so a locked file would look deleted."""
+    with R.SessionRecorder(R.session_audio_path(5)) as rec:
+        rec.write(tone(0.2))
+
+    def locked(self, *a, **kw):
+        raise PermissionError(13, "The process cannot access the file")
+    monkeypatch.setattr(R.Path, "unlink", locked)
+
+    removed, error = R.delete_session_audio(5)
+    assert removed is False
+    assert "cannot access" in error and "session_5.wav" in error
+    assert capsys.readouterr().out == "", "failure reported by print(), invisible in the GUI"
 
 
 def test_delete_all_frees_everything(tmp_path):

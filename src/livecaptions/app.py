@@ -270,6 +270,7 @@ def run(args) -> None:
                   if args.wav else None)
     _cache = {}          # cached WhisperModel keyed by name — avoids a reload on a device/speaker change
     _first = {"cli": True}
+    _writer = {"w": None}   # set below; build_source needs its session id to name the audio
 
     def _resolve_audio():
         if args.wav:
@@ -310,8 +311,20 @@ def run(args) -> None:
         live_diarize = getattr(args, "diarize_live", False) or getattr(settings, "speaker_colors", False)
         if getattr(args, "streaming", False) or live_diarize:
             from .sources.streaming_local import StreamingTranscriptionSource
-            return StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
-                                                diarize=live_diarize)
+            src = StreamingTranscriptionSource(audio, model, settings, source_id="loopback",
+                                               diarize=live_diarize)
+            # Keeping the audio is what makes a later, much better offline
+            # re-diarization possible. Off unless asked for: it is raw recordings of
+            # private conversations at ~110 MB/hour.
+            sid = _writer["w"].session_id if _writer["w"] is not None else None
+            if getattr(settings, "save_audio", False) and sid is not None:
+                from .capture.recorder import SessionRecorder, session_audio_path
+                path = session_audio_path(sid, settings=settings)
+                src.attach_recorder(SessionRecorder(
+                    path, session_id=sid,
+                    max_mb=float(getattr(settings, "audio_max_mb", 0) or 0)))
+                print(f"Saving audio to: {path}")
+            return src
         return LocalTranscriptionSource(audio, model, settings, source_id="loopback")
 
     def release_model():
@@ -337,6 +350,7 @@ def run(args) -> None:
         from .store.writer import TranscriptWriter
         writer = TranscriptWriter(source=src_name)
         writer.start()
+        _writer["w"] = writer
 
     try:
         _dispatch(build_source, settings, args, source_name=src_name, is_live=is_live,

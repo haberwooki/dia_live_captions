@@ -5,20 +5,28 @@ survive a restart, regenerating replaces rather than duplicates, a to-do with no
 clear owner stays unowned, and truncation is visible instead of silent.
 """
 import json
+import re
 
 import pytest
 
 pytest.importorskip("pydantic")
 
+from pydantic import ValidationError  # noqa: E402
+
 from livecaptions import config  # noqa: E402
 from livecaptions.llm.providers import LLMError  # noqa: E402
 from livecaptions.notes.generate import (  # noqa: E402
+    _SYSTEM,
     ConsentRequired,
+    NotesNotStored,
+    NotesUnreadable,
     SessionNotes,
     StoredNotes,
     ToDo,
+    delete_notes,
     generate_notes,
     load_notes,
+    payload_chars,
     privacy_notice,
     to_markdown,
 )
@@ -233,3 +241,193 @@ def test_privacy_notice_warns_when_the_session_will_be_cut(conn):
                             conn, 1, max_chars=60)
     assert "leaves this machine" in notice
     assert "earlier part" in notice
+
+
+def _characters_in(notice: str) -> int:
+    m = re.search(r"([\d,]+) characters", notice)
+    assert m, f"no character count in the notice: {notice!r}"
+    return int(m.group(1).replace(",", ""))
+
+
+def test_privacy_notice_counts_everything_that_is_sent(conn):
+    """The number shown before consent must cover the prompt and headers too, not
+    just the transcript — the system prompt alone is over a kilobyte."""
+    from livecaptions.llm.providers import ProviderConfig
+
+    prov = FakeProvider()
+    generate_notes(conn, 1, prov, consented=True)
+    really_sent = len(prov.calls[0]["system"]) + len(prov.calls[0]["user"])
+
+    shown = _characters_in(privacy_notice(
+        ProviderConfig(kind="anthropic", model="claude-opus-4-8"), conn, 1))
+    assert shown >= really_sent, (
+        f"consent dialog said {shown} characters but {really_sent} were sent")
+    assert payload_chars(conn, 1) == really_sent
+
+
+def test_privacy_notice_is_not_just_the_transcript_length(conn):
+    from livecaptions.llm.providers import ProviderConfig
+    from livecaptions.store.naming import build_transcript
+
+    transcript, _ = build_transcript(conn, 1, max_chars=120_000)
+    shown = _characters_in(privacy_notice(
+        ProviderConfig(kind="local", model="llama3.1",
+                       base_url="http://localhost:11434/v1"), conn, 1))
+    assert shown > len(transcript) + len(_SYSTEM) - 1
+
+
+# --- MAJOR 1: the store hands out ONE connection, shared with the live writer ---
+
+def test_reading_notes_does_not_commit_the_callers_transaction(conn):
+    """store.db opens a single check_same_thread=False connection that the live
+    TranscriptWriter appends to. If anything on the read path issues an implicit
+    COMMIT, opening the notes pane mid-session commits a half-written block."""
+    conn.execute("INSERT INTO utterances (session_id,t_start,t_end,wall_clock,speaker,text)"
+                 " VALUES (1,9.0,10.0,'2026-07-18T10:00:09','Dana','half-written block')")
+    assert conn.in_transaction, "this test needs an open transaction to be meaningful"
+
+    assert load_notes(conn, 1) is None
+    assert conn.in_transaction, "load_notes ended a transaction it did not start"
+
+    conn.rollback()
+    texts = [r["text"] for r in
+             conn.execute("SELECT text FROM utterances WHERE session_id=1").fetchall()]
+    assert "half-written block" not in texts, "the writer's uncommitted row was committed"
+
+
+def test_ensure_schema_does_not_commit_the_callers_transaction(conn):
+    """Same hazard reached through the other read path: the table already exists
+    by now, so this must be a pure read."""
+    from livecaptions.notes.generate import ensure_schema
+
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    conn.execute("INSERT INTO utterances (session_id,t_start,t_end,wall_clock,speaker,text)"
+                 " VALUES (1,11.0,12.0,'2026-07-18T10:00:11','Dana','also uncommitted')")
+    ensure_schema(conn)
+    assert conn.in_transaction, "ensure_schema ended a transaction it did not start"
+
+    conn.rollback()
+    texts = [r["text"] for r in
+             conn.execute("SELECT text FROM utterances WHERE session_id=1").fetchall()]
+    assert "also uncommitted" not in texts
+
+
+# --- MAJOR 2: an incomplete reply must not read as "there was nothing" ---
+
+def test_every_section_is_required_of_the_model():
+    """With default_factory the lists drop out of `required`, and a model that
+    answers with only a summary looks identical to a session with no to-dos."""
+    assert set(SessionNotes.model_json_schema()["required"]) == {
+        "summary", "key_points", "todos", "decisions"}
+
+
+def test_a_summary_only_reply_is_rejected(conn):
+    """llm.providers falls back to plain json_object mode whenever a server
+    rejects strict json_schema — the common local case — and validates the raw
+    reply against exactly this schema."""
+    with pytest.raises(ValidationError):
+        SessionNotes.model_validate_json('{"summary": "We talked about Q3."}')
+
+
+def test_a_reply_missing_sections_is_refused_not_stored(conn):
+    """Belt and braces for a provider that hands back an unvalidated object."""
+    partial = SessionNotes.model_construct(summary="We talked about Q3.")
+    with pytest.raises(LLMError) as e:
+        generate_notes(conn, 1, FakeProvider(reply=partial), consented=True)
+    assert "todos" in str(e.value)
+    assert load_notes(conn, 1) is None, "an incomplete reply was stored"
+
+
+def test_an_explicitly_empty_reply_is_still_accepted(conn):
+    """Required does not mean non-empty: 'nobody committed to anything' is a
+    real answer and must survive."""
+    empty = SessionNotes(summary="Chit-chat.", key_points=[], todos=[], decisions=[])
+    notes = generate_notes(conn, 1, FakeProvider(reply=empty), consented=True)
+    assert notes.todos == []
+    assert load_notes(conn, 1).todos == []
+
+
+# --- a paid answer must not be thrown away by a database problem ---
+
+def test_notes_that_cannot_be_saved_are_handed_back(conn):
+    conn.execute("INSERT INTO sessions (id, started_at, source) VALUES (3,'2026-07-18T12:00','x')")
+    conn.execute("INSERT INTO utterances (session_id,t_start,t_end,wall_clock,speaker,text)"
+                 " VALUES (3,0.0,1.0,'2026-07-18T12:00:00','Dana','Something worth summarising.')")
+    conn.commit()
+
+    class SessionVanishes(FakeProvider):
+        """The user deletes the session while the model is thinking."""
+
+        def complete(self, system, user, schema):
+            conn.execute("DELETE FROM sessions WHERE id=3")
+            conn.commit()
+            return super().complete(system, user, schema)
+
+    with pytest.raises(NotesNotStored) as e:
+        generate_notes(conn, 3, SessionVanishes(), consented=True)
+    assert e.value.notes.summary == _REPLY.summary, "the model's answer was lost"
+    assert "export" in str(e.value).lower(), "no advice on how to keep the result"
+    assert "3" in str(e.value)
+
+
+# --- store=False, and delete ---
+
+def test_store_false_does_not_write_to_the_database(conn):
+    notes = generate_notes(conn, 1, FakeProvider(), consented=True, store=False)
+    assert notes.summary == _REPLY.summary
+    assert load_notes(conn, 1) is None, "store=False wrote notes anyway"
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM session_notes").fetchone()["c"] == 0
+
+
+def test_delete_notes_removes_them(conn):
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    assert delete_notes(conn, 1) is True
+    assert load_notes(conn, 1) is None
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM session_notes WHERE session_id=1").fetchone()["c"] == 0
+
+
+def test_delete_notes_reports_when_there_was_nothing_to_delete(conn):
+    assert delete_notes(conn, 999) is False
+
+
+def test_delete_notes_leaves_other_sessions_alone(conn):
+    conn.execute("INSERT INTO sessions (id, started_at, source) VALUES (4,'2026-07-18T13:00','x')")
+    conn.execute("INSERT INTO utterances (session_id,t_start,t_end,wall_clock,speaker,text)"
+                 " VALUES (4,0.0,1.0,'2026-07-18T13:00:00','Dana','Another session entirely.')")
+    conn.commit()
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    generate_notes(conn, 4, FakeProvider(), consented=True)
+
+    assert delete_notes(conn, 4) is True
+    assert load_notes(conn, 1) is not None, "deleting one session's notes took another's"
+
+
+def test_deleting_a_session_takes_its_notes_with_it(conn):
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    conn.execute("DELETE FROM sessions WHERE id=1")
+    conn.commit()
+    assert load_notes(conn, 1) is None
+
+
+# --- a damaged row must not surface as a raw decode error ---
+
+def test_a_damaged_notes_row_is_reported_not_crashed(conn):
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    conn.execute("UPDATE session_notes SET notes_json='{\"summary\": ' WHERE session_id=1")
+    conn.commit()
+
+    with pytest.raises(NotesUnreadable) as e:
+        load_notes(conn, 1)
+    assert "again" in str(e.value), "no hint that regenerating fixes it"
+
+
+def test_a_notes_row_from_another_shape_is_reported_not_crashed(conn):
+    generate_notes(conn, 1, FakeProvider(), consented=True)
+    conn.execute("UPDATE session_notes SET notes_json='{\"summary\": 5, \"todos\": \"lots\"}'"
+                 " WHERE session_id=1")
+    conn.commit()
+
+    with pytest.raises(NotesUnreadable):
+        load_notes(conn, 1)

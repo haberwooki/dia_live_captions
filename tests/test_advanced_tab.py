@@ -4,6 +4,7 @@ that cannot work is never stored, "reset" really means the shipped defaults, and
 nothing here writes outside the config file it was pointed at.
 """
 import os
+import time
 
 import pytest
 
@@ -43,6 +44,31 @@ def make_tab(cfg, monkeypatch):
 @pytest.fixture
 def tab(make_tab):
     return make_tab()
+
+
+@pytest.fixture
+def tab_from(cfg, monkeypatch):
+    """A tab built from a config file that already exists, as on a real launch."""
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(adv, "probe_hotkey", lambda spec: "free")
+
+    def _make(toml: str, **kw):
+        cfg.write_text(toml, encoding="utf-8")
+        settings = config.Settings()
+        assert str(config.CONFIG_PATH) == str(cfg)
+        tab = adv.AdvancedTab(settings, **kw)
+        tab.RESTART_DELAY_MS = 0
+        return tab
+    return _make
+
+
+def _pump_until(pred, timeout=5.0):
+    """Let real Qt timers fire — the debounce is only real if time passes."""
+    app = QtWidgets.QApplication.instance()
+    deadline = time.monotonic() + timeout
+    while not pred() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
 
 
 def _reloaded(cfg):
@@ -237,6 +263,131 @@ def test_reset_is_confirmed_first(tab, monkeypatch):
     tab._beam.setValue(6)
     tab._on_reset()
     assert config.Settings().beam_size == 6, "reset happened without confirmation"
+
+
+# ---- the status must describe the combo on screen --------------------------
+def test_status_is_not_carried_over_to_a_remapped_hotkey(make_tab, monkeypatch):
+    """A registration result belongs to the combo it was tried with. Reporting it
+    against a combo the app never registered is a confident lie."""
+    tab = make_tab(registered={"hotkey_toggle": True})
+    tab.refresh_hotkey_status()
+    assert "Working now" in tab._hotkey_notes["hotkey_toggle"].text()
+
+    monkeypatch.setattr(adv, "probe_hotkey", lambda spec: "in use")
+    edit = tab._hotkey_edits["hotkey_toggle"]
+    edit.setText("ctrl+shift+f9")
+    edit.editingFinished.emit()
+
+    note = tab._hotkey_notes["hotkey_toggle"].text()
+    assert "Working now" not in note, "old registration reported against the new combo"
+    assert "In use" in note
+    assert "Show / hide captions (ctrl+shift+f9)" in tab._hk_status.text()
+
+
+def test_a_failed_registration_does_not_condemn_the_new_combo(make_tab):
+    tab = make_tab(registered={"hotkey_toggle": False})
+    edit = tab._hotkey_edits["hotkey_toggle"]
+    edit.setText("ctrl+shift+f9")
+    edit.editingFinished.emit()
+
+    note = tab._hotkey_notes["hotkey_toggle"].text()
+    assert "Not working" not in note, "condemned a combo that was never tried"
+    assert "Available" in note
+    assert "Every shortcut is available" in tab._hk_status.text()
+
+
+def test_status_probes_what_is_typed_not_what_is_stored(tab, monkeypatch):
+    seen = []
+    monkeypatch.setattr(adv, "probe_hotkey", lambda spec: (seen.append(spec), "free")[1])
+    tab._hotkey_edits["hotkey_toggle"].setText("ctrl+shift+f9")
+    tab.refresh_hotkey_status()
+    assert "ctrl+shift+f9" in seen, "checked a combo the user can no longer see"
+    assert "ctrl+alt+c" not in seen
+
+
+def test_an_unusable_combo_gets_no_verdict(tab):
+    tab._hotkey_edits["hotkey_toggle"].setText("ctrl+alt+banana")
+    tab.refresh_hotkey_status()
+    note = tab._hotkey_notes["hotkey_toggle"].text()
+    assert "Not checked" in note
+    assert "Available" not in note, "vouched for a combination that cannot work"
+
+
+# ---- values the widgets were not built for ---------------------------------
+def test_out_of_range_config_values_are_shown_not_clamped(tab_from, cfg):
+    tab = tab_from('block_sec = 2.5\nbeam_size = 40\ngpu_compute = "int8_bfloat16"\n')
+
+    assert tab._block.value() == pytest.approx(2.5), "showed a block size the app is not using"
+    assert tab._beam.value() == 40, "showed a beam size the app is not using"
+    assert tab._gpu.currentText() == "int8_bfloat16"
+
+    warning = tab._range_note.text()
+    assert not tab._range_note.isHidden(), "the out-of-range values were shown unflagged"
+    assert "2.5" in warning and "40" in warning and "int8_bfloat16" in warning
+    assert "beam_size = 40" in cfg.read_text(encoding="utf-8"), "overwrote the config on load"
+
+
+def test_in_range_values_are_not_flagged(tab):
+    assert tab._range_note.isHidden()
+
+
+# ---- hotkeys turned off ----------------------------------------------------
+def test_launching_with_hotkeys_off_disables_the_fields(tab_from):
+    tab = tab_from("hotkeys_enabled = false\n")
+    assert not tab._hk_enabled.isChecked()
+    assert [f for f, e in tab._hotkey_edits.items() if e.isEnabled()] == [], \
+        "hotkey fields stayed editable while hotkeys are off"
+
+
+# ---- duplicate detection ---------------------------------------------------
+def test_an_aliased_duplicate_combo_is_refused(tab, cfg):
+    """hotkeys.py maps 'esc' and 'escape' to the same virtual key, so comparing
+    the typed strings lets one physical combination drive two actions."""
+    toggle = tab._hotkey_edits["hotkey_toggle"]
+    toggle.setText("ctrl+alt+esc")
+    toggle.editingFinished.emit()
+    assert _reloaded(cfg).hotkey_toggle == "ctrl+alt+esc"
+
+    pause = tab._hotkey_edits["hotkey_pause"]
+    pause.setText("ctrl+alt+escape")
+    pause.editingFinished.emit()
+
+    assert config.Settings().hotkey_pause == "ctrl+alt+p", "one physical combo, two actions"
+    assert "already used" in tab._hotkey_notes["hotkey_pause"].text()
+    assert pause.text() == "ctrl+alt+p"
+
+
+# ---- rejected input never stays on screen ----------------------------------
+def test_a_refused_language_leaves_the_stored_one_on_screen(tab):
+    tab._lang.setCurrentText("klingon")
+    tab._on_language()
+    assert config.Settings().language == "en"
+    assert tab._lang.currentText() == "en", "displayed a language that was never stored"
+
+
+# ---- debounce and the rebuild actually firing ------------------------------
+def test_edits_are_debounced_into_one_rebuild(make_tab):
+    calls = []
+    tab = make_tab(on_restart=lambda: calls.append(1))
+    tab.RESTART_DELAY_MS = 80
+    tab._beam.setValue(3)
+    tab._beam.setValue(4)
+    tab._interval.setValue(0.7)
+
+    assert calls == [], "rebuilt the pipeline while the user was still typing"
+    assert tab._restart_timer.isActive(), "no rebuild was ever scheduled"
+
+    _pump_until(lambda: calls)
+    assert calls == [1], f"expected exactly one debounced rebuild, got {calls}"
+
+
+def test_reset_rebuilds_the_pipeline_without_being_asked_again(make_tab):
+    calls = []
+    tab = make_tab(on_restart=lambda: calls.append(1))
+    tab.RESTART_DELAY_MS = 20
+    tab.reset_to_defaults()
+    _pump_until(lambda: calls)
+    assert calls == [1], "reset changed the settings but never reloaded the pipeline"
 
 
 # ---- blast radius ----------------------------------------------------------

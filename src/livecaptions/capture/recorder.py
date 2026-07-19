@@ -10,18 +10,32 @@ OFF by default (``save_audio``). Keeping audio is a privacy decision the user ha
 not already made by keeping transcripts — the words were being stored, the voices
 were not — and a disk decision at ~115 MB/hour, hence the ``audio_max_mb`` cap.
 
-Crash safety — the header is kept CURRENT rather than repaired on open. stdlib
+Crash safety — the header is kept CURRENT while recording. stdlib
 ``Wave_write.writeframes`` re-patches the RIFF/data sizes after every write, and
 the seek it does to patch them flushes the preceding frames out of Python's
 buffer first. So the bytes a size field describes are always already on disk: a
 killed process leaves a header that at worst UNDER-counts the frames present,
 which every reader tolerates, and can never over-count and cause a truncated
-read. Repair-on-open was the alternative and was rejected because it would
-oblige every reader — ffmpeg, Audacity, a future offline pass — to know about
-the repair before the file is usable.
+read.
+
+Under-counting is still lost audio, though — a header stale by one patch reports
+a shorter file than exists, and a header killed before its first patch reports
+zero. So ``find_session_audio`` repairs a stale header IN PLACE before handing
+the path out. That is deliberately not "repair on open": the repair happens once,
+at the single lookup every consumer goes through, and what they then open is an
+ordinary WAV. ffmpeg, Audacity and a future offline pass still need to know
+nothing about it. The repair only ever grows the counts to match the bytes
+actually on disk, so it cannot manufacture a truncated read.
+
+ORPHAN AUDIO — deleting a transcript does NOT delete its recording. Nothing in
+this module is wired to transcript deletion; ``delete_session_audio(session_id)``
+exists for that and currently has no callers, so a user who deletes a private
+conversation from the Transcripts tab still has its raw voices on disk. Until the
+Transcripts tab calls it, ``delete_all_audio`` in Settings is the only way out.
 """
 from __future__ import annotations
 
+import struct
 import threading
 import wave
 from pathlib import Path
@@ -45,39 +59,120 @@ AUDIO_DIRNAME = "audio"
 #: raise mid-session.
 _RIFF_LIMIT_BYTES = 0xFFFFFFFF - 36
 
+#: How long stop() will wait for an in-flight write before leaving the close to
+#: the writer thread. Long enough for any healthy disk, short enough that a hung
+#: one does not freeze the GUI thread that called stop().
+_STOP_IO_WAIT_SEC = 0.25
 
-def audio_dir(base: Path | str | None = None) -> Path:
+
+def audio_dir(base: Path | str | None = None, settings=None) -> Path:
     """Where session audio lives: beside the transcript store, since the two are
     only useful together. DB_PATH is read at CALL time, not bound at import (same
     reason as store.db.connect) so tests and a future 'store location' setting
-    redirect the audio with the transcripts instead of writing to the real one."""
+    redirect the audio with the transcripts instead of writing to the real one.
+
+    `settings.audio_save_dir` overrides it. This must stay in agreement with the
+    Speakers tab, which locates a session's WAV the same way — when the two
+    disagreed, re-diarization simply reported "no saved audio" forever.
+    """
     if base is not None:
         return Path(base)
+    if settings is not None:
+        configured = str(getattr(settings, "audio_save_dir", "") or "").strip()
+        if configured:
+            return Path(configured)
     from ..store.db import DB_PATH
     return Path(DB_PATH).parent / AUDIO_DIRNAME
 
 
-def session_audio_path(session_id: int, base: Path | str | None = None) -> Path:
-    return audio_dir(base) / f"session_{int(session_id)}.wav"
+def session_audio_path(session_id: int, base: Path | str | None = None,
+                       settings=None) -> Path:
+    """The one place a session's audio filename is spelled. Both the recorder and
+    the Speakers tab go through here — when each had its own idea of the name, the
+    tab reported "no saved audio" for files sitting on disk."""
+    return audio_dir(base, settings) / f"session_{int(session_id)}.wav"
+
+
+def repair_wav_header(path: Path | str) -> int:
+    """Grow a stale RIFF/data size to cover the frames actually on disk.
+
+    A process killed between a write and its header patch leaves a WAV that opens
+    fine but reports too few frames — the audio is there, no reader can see it.
+    Returns the number of frames recovered (0 when the header was already right,
+    or when the file is not one of ours to touch).
+
+    Conservative on purpose: it only accepts the canonical 44-byte PCM layout this
+    module writes, and only ever raises the counts, never lowers them, so it can
+    never make a header claim more audio than the file holds.
+    """
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+        if size <= HEADER_BYTES:
+            return 0
+        with open(path, "r+b") as fh:
+            head = fh.read(HEADER_BYTES)
+            if len(head) < HEADER_BYTES:
+                return 0
+            if head[0:4] != b"RIFF" or head[8:12] != b"WAVE":
+                return 0
+            # fmt chunk of 16 bytes immediately followed by data is what `wave`
+            # emits for PCM; anything else may have chunks after `data`, and then
+            # the trailing bytes are not audio.
+            if head[12:16] != b"fmt " or head[16:20] != struct.pack("<I", 16):
+                return 0
+            if head[36:40] != b"data":
+                return 0
+            block_align = struct.unpack_from("<H", head, 32)[0]
+            declared = struct.unpack_from("<I", head, 40)[0]
+            if block_align <= 0:
+                return 0
+            available = size - HEADER_BYTES
+            actual = available - (available % block_align)   # ignore a torn frame
+            if actual <= declared:
+                return 0
+            fh.seek(4)
+            fh.write(struct.pack("<I", HEADER_BYTES - 8 + actual))
+            fh.seek(40)
+            fh.write(struct.pack("<I", actual))
+            fh.flush()
+        return (actual - declared) // block_align
+    except (OSError, struct.error):
+        # A locked, read-only or half-written file is still readable at its stale
+        # length; failing the lookup over it would be worse than the short read.
+        return 0
 
 
 def find_session_audio(session_id: int, base: Path | str | None = None) -> Optional[Path]:
-    """The audio for a session, or None if it was never saved or has been deleted."""
+    """The audio for a session, or None if it was never saved or has been deleted.
+
+    Repairs a stale header on the way out (module docstring) so every consumer
+    gets the full recording without knowing a kill happened.
+    """
     path = session_audio_path(session_id, base)
-    return path if path.is_file() else None
+    if not path.is_file():
+        return None
+    repair_wav_header(path)
+    return path
 
 
-def delete_session_audio(session_id: int, base: Path | str | None = None) -> bool:
-    """Delete one session's audio. True if a file was actually removed."""
+def delete_session_audio(session_id: int,
+                         base: Path | str | None = None) -> Tuple[bool, str]:
+    """Delete one session's audio. Returns (removed, error).
+
+    ``error`` is empty when the file was removed or was already gone, and carries
+    the reason when deletion actually failed — a file locked by a player, a
+    read-only drive. Reported rather than printed because print() goes nowhere in
+    the windowed PyInstaller build, which would make "Delete" look like it worked.
+    """
     path = session_audio_path(session_id, base)
     try:
         path.unlink()
-        return True
+        return True, ""
     except FileNotFoundError:
-        return False
+        return False, ""
     except OSError as e:
-        print(f"(couldn't delete {path.name}: {e})")
-        return False
+        return False, f"Couldn't delete {path.name}: {e}"
 
 
 def audio_files(base: Path | str | None = None) -> List[Path]:
@@ -121,7 +216,15 @@ def format_bytes(n: int) -> str:
 
 
 def _to_pcm16(samples) -> bytes:
+    """16 kHz MONO samples to PCM16 bytes. Raises on anything else — write()
+    catches it (see SessionRecorder.write)."""
     a = np.asarray(samples)
+    if a.ndim == 2 and 1 in a.shape:
+        a = a.reshape(-1)                # sounddevice hands mono back as (N, 1)
+    if a.ndim != 1:
+        # Interleaved multi-channel written as mono plays back at N times speed and
+        # is not what the ASR transcribed, so it is refused rather than downmixed.
+        raise ValueError(f"expected mono audio, got shape {np.shape(samples)}")
     if a.dtype == np.int16:
         return a.tobytes()
     # Clip before scaling: an over-driven block (auto-gain can push past 1.0) would
@@ -134,9 +237,10 @@ class SessionRecorder:
     """Streams 16 kHz mono PCM to a WAV as chunks arrive — nothing is buffered in
     RAM beyond the current chunk, because an hour of session is ~115 MB.
 
-    It never raises at the caller. A full disk or a reached cap stops the
-    recording and reports why: losing the optional audio must not take the
-    captions down with it.
+    It never raises at the caller — not on a full disk, not on a reached cap, not
+    on a chunk it cannot convert. Any of those stops the recording and reports
+    why: losing the optional audio must not take the captions down with it. The
+    caller is the AUDIO THREAD, which has no exception handler of its own.
     """
 
     def __init__(self, path: Path | str, *, session_id: Optional[int] = None,
@@ -150,7 +254,13 @@ class SessionRecorder:
             self._max_bytes, self._cap_desc = cap, f"{self.max_mb:g} MB"
         else:
             self._max_bytes, self._cap_desc = _RIFF_LIMIT_BYTES, "4 GB (WAV format)"
-        self._lock = threading.Lock()
+        # Two locks, because they are held for very different lengths of time.
+        # _state guards the flags and the frame count and is never held across I/O,
+        # so stop() from the GUI thread can always take it. _io guards the file
+        # handle and IS held across a write that a stalled disk can hang for
+        # seconds; stop() only ever waits on it with a timeout.
+        self._state = threading.Lock()
+        self._io = threading.Lock()
         self._frames = 0
         self._fh = None
         self._wav: Optional[wave.Wave_write] = None
@@ -177,15 +287,28 @@ class SessionRecorder:
         Returns False once recording has stopped — the caller carries on
         transcribing either way, and can read `stop_reason` to tell the user.
         """
-        with self._lock:
-            if self.stopped or self._wav is None:
+        with self._state:
+            if self.stopped:
                 return False
+            size = self.size_bytes
+
+        try:
             data = _to_pcm16(samples)
-            if not data:
-                return True
-            if self.size_bytes + len(data) > self._max_bytes:
-                self._shut(f"Audio saving stopped at the {self._cap_desc} limit "
-                           f"({format_bytes(self.size_bytes)} saved). Captions continue.")
+        except Exception as e:
+            # Conversion is inside the guarantee too: a wrong-shaped or non-numeric
+            # chunk must not raise into the audio thread just because it failed
+            # before reaching the disk.
+            self._finish(f"Audio saving stopped — unusable audio chunk: {e}")
+            return False
+        if not data:
+            return True
+        if size + len(data) > self._max_bytes:
+            self._finish(f"Audio saving stopped at the {self._cap_desc} limit "
+                         f"({format_bytes(size)} saved). Captions continue.")
+            return False
+
+        with self._io:
+            if self._wav is None or self._fh is None:
                 return False
             try:
                 self._wav.writeframes(data)     # also re-patches the header (see module docstring)
@@ -193,10 +316,17 @@ class SessionRecorder:
             except Exception as e:
                 # Anything at all — full disk, removed drive, RIFF overflow. Audio is
                 # the optional half of this app; it stops quietly, captures keep going.
-                self._shut(f"Audio saving stopped — write failed: {e}")
+                self._mark_stopped(f"Audio saving stopped — write failed: {e}")
+                self._close_locked()
                 return False
-            self._frames += len(data) // SAMPLE_WIDTH
-            return True
+            with self._state:
+                self._frames += len(data) // SAMPLE_WIDTH
+                handover = self.stopped
+            if handover:
+                # stop() gave up waiting on this write and left the file to us.
+                self._close_locked()
+                return False
+        return True
 
     # ---- state ----
     @property
@@ -215,26 +345,50 @@ class SessionRecorder:
     # ---- lifecycle ----
     def stop(self, reason: str = "") -> None:
         """Finish the file. Safe to call repeatedly, from any thread, and after a
-        cap or an error already stopped it."""
-        with self._lock:
-            self._shut(reason or "Recording finished.")
+        cap or an error already stopped it.
 
-    def _shut(self, reason: str) -> None:
-        if self.stopped:
-            return               # keep the FIRST reason: the cap/error, not "finished"
-        self.stopped = True
-        self.stop_reason = reason
+        Called from the GUI thread, so it never blocks behind an in-flight write:
+        the recording is marked stopped immediately, and if the disk is hung the
+        close is handed to the writer, which does it as soon as its write returns.
+        A file left open that way is still valid on disk — the header is current
+        (module docstring) — and find_session_audio repairs it if it is not.
+        """
+        self._mark_stopped(reason or "Recording finished.")
+        self._close_files(timeout=_STOP_IO_WAIT_SEC)
+
+    def _mark_stopped(self, reason: str) -> None:
+        with self._state:
+            if self.stopped:
+                return           # keep the FIRST reason: the cap/error, not "finished"
+            self.stopped = True
+            self.stop_reason = reason
+
+    def _finish(self, reason: str) -> None:
+        self._mark_stopped(reason)
+        self._close_files()
+
+    def _close_files(self, timeout: Optional[float] = None) -> bool:
+        """Close the handles. False if the writer held _io longer than `timeout`."""
+        if not self._io.acquire(timeout=timeout if timeout is not None else -1):
+            return False
         try:
-            if self._wav is not None:
-                self._wav.close()          # final header patch
+            self._close_locked()
+        finally:
+            self._io.release()
+        return True
+
+    def _close_locked(self) -> None:
+        wav, fh, self._wav, self._fh = self._wav, self._fh, None, None
+        try:
+            if wav is not None:
+                wav.close()                # final header patch
         except Exception:
             pass                 # an unpatchable header is still a readable file
         try:
-            if self._fh is not None:
-                self._fh.close()
+            if fh is not None:
+                fh.close()
         except Exception:
             pass
-        self._wav = self._fh = None
 
     def _open(self) -> None:
         try:
@@ -252,7 +406,7 @@ class SessionRecorder:
             self._wav.writeframes(b"")
             self._fh.flush()
         except Exception as e:
-            self._shut(f"Couldn't record to {self.path.name}: {e}")
+            self._finish(f"Couldn't record to {self.path.name}: {e}")
 
     def __enter__(self) -> "SessionRecorder":
         return self
@@ -265,6 +419,7 @@ class SessionRecorder:
         # the collector picks — `wave` flushing a handle that was already closed,
         # printing an ignored exception. Closing here keeps the WAV tidy regardless.
         try:
-            self._shut("Recording dropped without stop().")
+            self._mark_stopped("Recording dropped without stop().")
+            self._close_files(timeout=_STOP_IO_WAIT_SEC)
         except Exception:
             pass
