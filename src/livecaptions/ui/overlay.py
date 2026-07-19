@@ -528,7 +528,8 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
         overlay._timers = (health, done)   # keep refs alive
 
     def _on_failed(msg: str) -> None:
-        overlay.set_status(f"couldn't start: {msg[:90]}", warn=True)
+        overlay.set_status(f"couldn't start: {msg[:110]} — press {settings.hotkey_pause} "
+                           f"or use Settings to try again", warn=True)
         transport._set("error")
         if holder["restarting"]:
             holder["restarting"] = False

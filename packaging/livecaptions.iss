@@ -12,7 +12,7 @@
 ;    anything outside our own %LOCALAPPDATA%\live-captions tree.
 
 #define AppName "Live Captions"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define AppPublisher "live-captions"
 #define AppExeCli "livecaptions.exe"
 #define AppExeGui "livecaptions-overlay.exe"

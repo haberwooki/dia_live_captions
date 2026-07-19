@@ -56,14 +56,32 @@ def _import_whisper_model():
     return WhisperModel
 
 
+def _missing_weights(err: Exception) -> bool:
+    """True for the 'cache is half-built' failure: the blob downloaded but the
+    snapshot link wasn't created yet, so CTranslate2 opens a directory with no
+    model.bin in it. Seen in the wild — four consecutive launch failures while the
+    cache finished linking itself, then it worked."""
+    s = str(err).lower()
+    return "unable to open file" in s or "no such file" in s
+
+
 def _new_model(WhisperModel, name: str, device: str, compute: str):
     """Prefer the already-cached model: faster-whisper otherwise makes a Hugging
     Face round-trip on every launch to revalidate a snapshot we already have
     (1.8-4.5 s). Falls back to the normal online path when it isn't cached yet."""
     try:
         return WhisperModel(name, device=device, compute_type=compute, local_files_only=True)
-    except Exception:
-        return WhisperModel(name, device=device, compute_type=compute)
+    except Exception as local_err:
+        try:
+            return WhisperModel(name, device=device, compute_type=compute)
+        except Exception as online_err:
+            if not (_missing_weights(local_err) or _missing_weights(online_err)):
+                raise
+            # Repair an incomplete cache rather than telling the user to reinstall.
+            print("  model cache looks incomplete; re-fetching the weights...")
+            from faster_whisper.utils import download_model
+            path = download_model(name, local_files_only=False)
+            return WhisperModel(path, device=device, compute_type=compute)
 
 
 def _cuda_device_present() -> bool:
@@ -122,8 +140,11 @@ def load_model(settings):
                              "nvidia-cuda-runtime-cu12)") + "; falling back to CPU.")
                 else:
                     print("  Falling back to CPU (slower).")
-    print(f"\nCould not load the model on any device. Last error: {last_err}")
-    raise SystemExit(1)
+    # Carry the REASON in the exception, not just an exit code: this propagates to
+    # the overlay, and `str(SystemExit(1))` renders as the useless text "1".
+    msg = f"Could not load the speech model on any device. Last error: {last_err}"
+    print(f"\n{msg}")
+    raise SystemExit(msg)
 
 
 class WhisperWorker:
