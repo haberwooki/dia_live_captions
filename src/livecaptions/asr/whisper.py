@@ -81,7 +81,52 @@ def _new_model(WhisperModel, name: str, device: str, compute: str):
             print("  model cache looks incomplete; re-fetching the weights...")
             from faster_whisper.utils import download_model
             path = download_model(name, local_files_only=False)
-            return WhisperModel(path, device=device, compute_type=compute)
+            # Retry, because the file we just created is not necessarily openable
+            # yet. Observed in the wild: the repair rebuilt the snapshot at 22:01,
+            # the very next open still failed, and a relaunch seconds later worked.
+            # A freshly materialised 75 MB blob is exactly what a virus scanner
+            # grabs first, and CTranslate2 reports any open failure as the same
+            # "Unable to open file 'model.bin'".
+            return _open_with_retry(
+                lambda: WhisperModel(path, device=device, compute_type=compute), path)
+
+
+def _open_with_retry(open_model, path: str, attempts: int = 4, delay: float = 1.0):
+    """Try to open a just-written model a few times before giving up."""
+    last = None
+    for i in range(attempts):
+        try:
+            return open_model()
+        except Exception as e:
+            last = e
+            if not _missing_weights(e):
+                raise                      # a different failure won't fix itself
+            if i < attempts - 1:
+                print(f"  weights not readable yet; retrying in {delay:.0f}s "
+                      f"({i + 1}/{attempts - 1})...")
+                time.sleep(delay)
+    _describe_cache(path)                  # make the next report diagnosable in one pass
+    raise last
+
+
+def _describe_cache(path: str) -> None:
+    """Dump what is actually in the model directory. Without this, a repeat of this
+    failure costs another round-trip through the user just to learn whether the file
+    is missing, a dangling link, or present-but-unreadable."""
+    import os
+    try:
+        print(f"  model directory: {path}")
+        for entry in sorted(os.listdir(path)):
+            full = os.path.join(path, entry)
+            link = f" -> {os.readlink(full)}" if os.path.islink(full) else ""
+            try:
+                size = os.path.getsize(full)      # follows the link; fails if dangling
+                readable = os.access(full, os.R_OK)
+                print(f"    {entry}: {size:,} bytes, readable={readable}{link}")
+            except OSError as e:
+                print(f"    {entry}: UNREADABLE ({e.__class__.__name__}){link}")
+    except OSError as e:
+        print(f"  couldn't inspect the model directory: {e}")
 
 
 def _cuda_device_present() -> bool:

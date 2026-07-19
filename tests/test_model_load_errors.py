@@ -85,3 +85,55 @@ def test_unrelated_errors_do_not_trigger_a_redownload(monkeypatch):
 
     with pytest.raises(Boom):
         W._new_model(fake_model, "tiny.en", "cuda", "float16")
+
+
+class TestTransientLockRetry:
+    """A model file that was JUST written may not be openable for a second or two —
+    a virus scanner holds a freshly materialised 75 MB blob. Observed in the wild:
+    the cache repair rebuilt the snapshot, the immediate re-open still failed, and a
+    relaunch seconds later worked. Retrying is the difference between "it fixed
+    itself" and "the app is broken until you restart it"."""
+
+    def test_retries_until_the_file_becomes_readable(self, monkeypatch):
+        monkeypatch.setattr(W.time, "sleep", lambda s: None)
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise Boom("Unable to open file 'model.bin'")
+            return "MODEL"
+
+        assert W._open_with_retry(flaky, "somewhere") == "MODEL"
+        assert len(calls) == 3, "gave up too early"
+
+    def test_gives_up_eventually_and_reports_the_cache(self, monkeypatch, capsys):
+        monkeypatch.setattr(W.time, "sleep", lambda s: None)
+
+        def always_locked():
+            raise Boom("Unable to open file 'model.bin'")
+
+        with pytest.raises(Boom):
+            W._open_with_retry(always_locked, "somewhere", attempts=2)
+        assert "model directory" in capsys.readouterr().out, "no diagnostics on failure"
+
+    def test_a_different_error_is_not_retried(self, monkeypatch):
+        """Retrying a missing CUDA DLL just delays the CPU fallback by seconds."""
+        monkeypatch.setattr(W.time, "sleep", lambda s: None)
+        calls = []
+
+        def wrong_error():
+            calls.append(1)
+            raise Boom("Library cublas64_12.dll is not found or cannot be loaded")
+
+        with pytest.raises(Boom):
+            W._open_with_retry(wrong_error, "somewhere")
+        assert len(calls) == 1
+
+    def test_cache_description_survives_a_dangling_symlink(self, tmp_path, capsys):
+        """The diagnostic must not itself throw on the broken state it exists to
+        describe."""
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        W._describe_cache(str(tmp_path))
+        assert "config.json" in capsys.readouterr().out
+        W._describe_cache(str(tmp_path / "does-not-exist"))   # must not raise

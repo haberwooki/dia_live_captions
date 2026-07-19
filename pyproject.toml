@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "livecaptions"
-version = "0.2.5"
+version = "0.2.6"
 description = "Cross-app live-captions overlay — local GPU transcription of Windows system audio."
 readme = "README.md"
 license = "MIT"
