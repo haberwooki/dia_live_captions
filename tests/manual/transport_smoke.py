@@ -63,7 +63,7 @@ factory.release_model = lambda: released.append(1)
 
 settings = Settings()
 settings.open_settings_on_launch = True
-settings.start_captions_on_launch = True   # this test is about the running pipeline
+settings.startup_mode = "always"           # this test is about the running pipeline
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
@@ -125,6 +125,10 @@ def t_after_restart():
     check("restarted after stop", tr.state == "running", tr.state)
     check("third source built", len(built) == 3, f"built={len(built)}")
     check("app still alive", True)
+    # "how I leave it is how it re-opens" — the state must reach disk, not just the
+    # in-memory settings object, or the next launch has nothing to resume from.
+    saved = Settings().last_transport_state
+    check("last state persisted for resume", saved == "running", saved)
     app.quit()
 
 

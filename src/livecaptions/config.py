@@ -81,7 +81,12 @@ class Settings(BaseSettings):
     speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
     open_settings_on_launch: bool = True  # show the Settings window when the app starts
     overlay_movable: bool = False         # draggable (vs click-through); remembered across launches
-    start_captions_on_launch: bool = True  # begin capturing immediately, or wait for Start
+    # What happens to captions when the app opens. "resume" honours how you left it,
+    # which is why it is the default: a fixed checkbox cannot express "I pressed Start
+    # last time, so start". "always" / "never" pin it either way.
+    startup_mode: str = "resume"          # resume | always | never
+    last_transport_state: str = "running"  # updated as you Start/Pause/Stop
+    start_captions_on_launch: bool = True  # legacy; migrated into startup_mode
     settings_tab: int = 0                 # reopen the control panel on the tab you left on
 
     # Windows applies the output volume before we capture, so quiet playback would

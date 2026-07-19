@@ -143,10 +143,19 @@ class SettingsWindow(QtWidgets.QWidget):
             row.addWidget(b)
         v.addLayout(row)
 
-        self._start_launch = QtWidgets.QCheckBox("Start captioning as soon as the app opens")
-        self._start_launch.setChecked(bool(getattr(self._settings, "start_captions_on_launch", True)))
-        self._start_launch.toggled.connect(lambda on: self._persist(start_captions_on_launch=on))
-        v.addWidget(self._start_launch)
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("When Live Captions opens:"))
+        self._startup = QtWidgets.QComboBox()
+        for label, mode in (("Resume how I left it", "resume"),
+                            ("Always start captioning", "always"),
+                            ("Wait for me to press Start", "never")):
+            self._startup.addItem(label, userData=mode)
+        cur = str(getattr(self._settings, "startup_mode", "resume") or "resume")
+        self._startup.setCurrentIndex(max(0, self._startup.findData(cur)))
+        self._startup.currentIndexChanged.connect(
+            lambda i: self._persist(startup_mode=self._startup.itemData(i)))
+        row2.addWidget(self._startup, 1)
+        v.addLayout(row2)
 
         self._transport.state_changed.connect(self._on_transport_state)
         self._on_transport_state(self._transport.state)

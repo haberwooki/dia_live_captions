@@ -359,6 +359,23 @@ class _SourceBuilder(QtCore.QObject):
         threading.Thread(target=_work, daemon=True).start()
 
 
+def should_start_on_launch(settings) -> bool:
+    """Should captions be running the moment the app opens?
+
+    "resume" is the default because a fixed checkbox cannot express the thing
+    people actually expect: press Start, close the app, and have it come back
+    captioning. Only a state we record as it changes can do that.
+    """
+    mode = str(getattr(settings, "startup_mode", "resume") or "resume").lower()
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    last = str(getattr(settings, "last_transport_state", "running") or "running")
+    # "paused" and "stopped" both mean "the user turned it off" -> stay off.
+    return last not in ("paused", "stopped")
+
+
 class Transport(QtCore.QObject):
     """Start / pause / stop the capture+ASR pipeline without quitting the app.
 
@@ -540,12 +557,23 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     builder.ready.connect(_start_source)
     builder.failed.connect(_on_failed)
     # Whether captions run the moment the app opens is the user's call, not ours.
-    if getattr(settings, "start_captions_on_launch", True) or not is_live:
+    if not is_live or should_start_on_launch(settings):
         overlay.set_status("loading model… (first run downloads ~1.5 GB, please wait)")
         builder.build(source_factory)
     else:
         transport._set("stopped")
         overlay.set_status("stopped — click Start in Settings to begin", warn=True)
+
+    # Remember how it was left, so "resume" has something to resume.
+    def _remember(state: str) -> None:
+        if is_live and state in ("running", "paused", "stopped"):
+            try:
+                from ..config import save_settings
+                settings.last_transport_state = state
+                save_settings(last_transport_state=state)
+            except Exception:
+                pass        # never let a settings write break the pipeline
+    transport.state_changed.connect(_remember)
 
     def _detach_source():
         """Drop the running source and its timers, returning the old source to be
