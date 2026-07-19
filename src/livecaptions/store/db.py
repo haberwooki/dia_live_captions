@@ -70,8 +70,12 @@ def fts5_available(conn: sqlite3.Connection) -> bool:
         return False
 
 
-def connect(path: Path | str = DB_PATH, *, create: bool = True) -> sqlite3.Connection:
-    path = Path(path)
+def connect(path: Path | str | None = None, *, create: bool = True) -> sqlite3.Connection:
+    """Open the transcript store. `path` resolves to DB_PATH at CALL time, not at
+    import time: a default argument would bind the module value once, so anything
+    redirecting DB_PATH (a test, a future 'store location' setting) would be
+    silently ignored and write to the user's real transcripts instead."""
+    path = Path(path if path is not None else DB_PATH)
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)

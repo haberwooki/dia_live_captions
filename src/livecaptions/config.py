@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     # What happens to captions when the app opens. "resume" honours how you left it,
     # which is why it is the default: a fixed checkbox cannot express "I pressed Start
     # last time, so start". "always" / "never" pin it either way.
+    save_transcripts: bool = True         # write sessions to the local store (never uploaded)
     startup_mode: str = "resume"          # resume | always | never
     last_transport_state: str = "running"  # updated as you Start/Pause/Stop
     start_captions_on_launch: bool = True  # legacy; migrated into startup_mode

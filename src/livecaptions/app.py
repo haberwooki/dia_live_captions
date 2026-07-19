@@ -332,7 +332,8 @@ def run(args) -> None:
 
     src_name = _wav_audio.name if args.wav else "loopback"
     writer = None
-    if not getattr(args, "no_save", False):
+    # --no-save still forces it off for one run; otherwise the GUI switch decides.
+    if not getattr(args, "no_save", False) and getattr(settings, "save_transcripts", True):
         from .store.writer import TranscriptWriter
         writer = TranscriptWriter(source=src_name)
         writer.start()
