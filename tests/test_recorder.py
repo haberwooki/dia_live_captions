@@ -361,12 +361,19 @@ def test_stop_does_not_block_behind_a_stalled_write(tmp_path):
     assert read_wav(tmp_path / "r.wav")[0].nframes == 0.3 * R.SAMPLE_RATE
 
 
-def test_orphan_audio_is_documented_until_deletion_is_wired_up(tmp_path):
-    """Deleting a transcript leaves its voices on disk; that must not go unsaid."""
+def test_deleting_a_session_is_wired_to_delete_its_audio():
+    """This used to assert the OPPOSITE — that orphaned audio was a known gap. It
+    is now wired into the Transcripts tab, so the invariant worth pinning is that
+    the deletion path exists and is reachable, not that it is missing."""
     doc = R.__doc__.lower()
-    assert "orphan" in doc
-    assert "delete_session_audio" in doc
-    assert "no callers" in doc
+    assert "orphan" in doc and "delete_session_audio" in doc
+    assert "no callers" not in doc, "docstring still describes the old gap"
+
+    import inspect
+
+    from livecaptions.ui import transcripts
+    src = inspect.getsource(transcripts.TranscriptsTab._on_delete)
+    assert "delete_session_audio" in src, "transcript deletion no longer removes audio"
 
 
 def test_totals_and_deletion(tmp_path):

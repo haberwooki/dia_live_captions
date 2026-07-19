@@ -65,23 +65,25 @@ class SettingsWindow(QtWidgets.QWidget):
             root.addWidget(self._transport_group())
 
         self._tabs = QtWidgets.QTabWidget()
-        self._tabs.addTab(self._tab([self._features_group()]), "Captions")
-        self._tabs.addTab(self._tab([self._audio_group()]), "Audio")
+        self._tabs.addTab(self._scrollable(self._tab([self._features_group()])), "Captions")
+        self._tabs.addTab(self._scrollable(self._tab([self._audio_group()])), "Audio")
         from .transcripts import TranscriptsTab
         self._tabs.addTab(TranscriptsTab(settings), "Transcripts")
         from .diarization import DiarizationTab
         # Live speaker colours are configured here now, not in the Captions tab, so
         # there is one place that owns them; pass the pipeline restart so toggling
         # takes effect immediately rather than on next launch.
-        self._tabs.addTab(DiarizationTab(settings, apply_pipeline=self._apply_pipeline),
-                          "Speakers")
+        self._tabs.addTab(self._scrollable(
+            DiarizationTab(settings, apply_pipeline=self._apply_pipeline)), "Speakers")
         from .ai import AITab
-        self._tabs.addTab(AITab(settings), "AI")
+        self._tabs.addTab(self._scrollable(AITab(settings)), "AI")
         from .advanced import AdvancedTab
         self._tabs.addTab(AdvancedTab(settings, on_restart=on_restart,
                                       registered=registered), "Advanced")
-        self._tabs.addTab(self._tab([self._appearance_group(), self._overlay_group()]), "Overlay")
-        self._tabs.addTab(self._tab([self._updates_group(), self._about_group()]), "Updates")
+        self._tabs.addTab(self._scrollable(
+            self._tab([self._appearance_group(), self._overlay_group()])), "Overlay")
+        self._tabs.addTab(self._scrollable(
+            self._tab([self._updates_group(), self._about_group()])), "Updates")
         # Reopen on the tab you left on — "how I leave it is how it re-opens".
         idx = int(getattr(self._settings, "settings_tab", 0) or 0)
         self._tabs.setCurrentIndex(idx if 0 <= idx < self._tabs.count() else 0)
@@ -117,6 +119,20 @@ class SettingsWindow(QtWidgets.QWidget):
             v.addWidget(w)
         v.addStretch(1)
         return page
+
+    @staticmethod
+    def _scrollable(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        """Let a tab be taller than the window instead of crushing itself.
+
+        Without this Qt squeezes group boxes to fit the available height and
+        word-wrapped explanatory text ends up overlapping the controls below it —
+        which looks like a rendering bug, not a full page. Caught by screenshotting
+        the Speakers tab; no test would have noticed."""
+        area = QtWidgets.QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        area.setWidget(widget)
+        return area
 
     def _about_group(self) -> QtWidgets.QGroupBox:
         g = QtWidgets.QGroupBox("About")

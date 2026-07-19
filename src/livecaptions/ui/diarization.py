@@ -191,6 +191,7 @@ class DiarizationTab(QtWidgets.QWidget):
 
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(self._live_group())
+        v.addWidget(self._audio_group())
         v.addWidget(self._offline_group())
         v.addWidget(self._legend_group())
         v.addStretch(1)
@@ -229,6 +230,80 @@ class DiarizationTab(QtWidgets.QWidget):
         save_settings(**kw)
 
     # ---- offline re-diarization ----
+    def _audio_group(self) -> QtWidgets.QGroupBox:
+        """Turn on keeping the audio.
+
+        Without this there is nothing to re-diarize, ever: the setting existed and
+        the recorder was wired up, but no control switched it on, so the section
+        below was permanently greyed out with "no saved audio". It lives here rather
+        than in the Transcripts tab because keeping audio is only worth its disk
+        space for re-diarization, and this is where that happens.
+        """
+        g = QtWidgets.QGroupBox("Keep the audio")
+        v = QtWidgets.QVBoxLayout(g)
+
+        self._save_audio = QtWidgets.QCheckBox(
+            "Save each session's audio so it can be re-diarized later")
+        self._save_audio.setChecked(bool(getattr(self._settings, "save_audio", False)))
+        self._save_audio.toggled.connect(self._on_save_audio)
+        v.addWidget(self._save_audio)
+
+        cost = QtWidgets.QLabel(
+            "About 110 MB per hour, kept on this PC and never uploaded. It applies to "
+            "NEW sessions — anything already recorded has no audio to save. Deleting a "
+            "session in Transcripts deletes its audio too.")
+        cost.setWordWrap(True)
+        cost.setStyleSheet("color: gray; font-size: 11px;")
+        v.addWidget(cost)
+
+        row = QtWidgets.QHBoxLayout()
+        self._audio_usage = QtWidgets.QLabel("")
+        self._audio_usage.setStyleSheet("color: gray; font-size: 11px;")
+        row.addWidget(self._audio_usage, 1)
+        self._audio_clear = QtWidgets.QPushButton("Delete all saved audio")
+        self._audio_clear.clicked.connect(self._on_clear_audio)
+        row.addWidget(self._audio_clear)
+        v.addLayout(row)
+        self._refresh_audio_usage()
+        return g
+
+    def _on_save_audio(self, on: bool) -> None:
+        self._persist(save_audio=on)
+        self._refresh_audio_usage()
+        if on:
+            self._status.setText(
+                "Audio will be kept from the next session you record — restart "
+                "captions if one is running now.")
+
+    def _refresh_audio_usage(self) -> None:
+        try:
+            from ..capture.recorder import audio_files, format_bytes, total_audio_bytes
+            n = len(audio_files(settings=self._settings))
+            total = total_audio_bytes(settings=self._settings)
+        except Exception as e:
+            self._audio_usage.setText(f"(couldn't read the audio folder: {e})")
+            return
+        self._audio_usage.setText(
+            f"{n} recording(s), {format_bytes(total)}" if n else "No audio saved yet.")
+        self._audio_clear.setEnabled(bool(n))
+
+    def _on_clear_audio(self) -> None:
+        from ..capture.recorder import delete_all_audio, format_bytes, total_audio_bytes
+        total = total_audio_bytes(settings=self._settings)
+        ok = QtWidgets.QMessageBox.question(
+            self, "Delete all saved audio?",
+            f"This permanently deletes {format_bytes(total)} of recordings.\n\n"
+            f"Transcripts are kept, but those sessions can no longer be re-diarized.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ok != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        removed, failed = delete_all_audio(settings=self._settings)
+        self._refresh_audio_usage()
+        self._status.setText(f"Deleted {removed} recording(s)."
+                             + (f" {failed} could not be deleted." if failed else ""))
+        self._refresh_sessions()
+
     def _offline_group(self) -> QtWidgets.QGroupBox:
         g = QtWidgets.QGroupBox("Re-diarize a saved session")
         form = QtWidgets.QFormLayout(g)

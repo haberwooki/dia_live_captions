@@ -27,11 +27,12 @@ ordinary WAV. ffmpeg, Audacity and a future offline pass still need to know
 nothing about it. The repair only ever grows the counts to match the bytes
 actually on disk, so it cannot manufacture a truncated read.
 
-ORPHAN AUDIO — deleting a transcript does NOT delete its recording. Nothing in
-this module is wired to transcript deletion; ``delete_session_audio(session_id)``
-exists for that and currently has no callers, so a user who deletes a private
-conversation from the Transcripts tab still has its raw voices on disk. Until the
-Transcripts tab calls it, ``delete_all_audio`` in Settings is the only way out.
+ORPHAN AUDIO — deleting a session in the Transcripts tab deletes its recording
+too, via ``delete_session_audio``; the confirmation names the file and its size
+first, because deleting a transcript and silently keeping the voices would be the
+wrong default either way round. ``delete_all_audio`` clears the lot from the
+Speakers tab. Any new path that removes a session MUST delete its audio as well —
+that was the gap this paragraph used to describe.
 """
 from __future__ import annotations
 
@@ -176,17 +177,17 @@ def delete_session_audio(session_id: int, base: Path | str | None = None,
         return False, f"Couldn't delete {path.name}: {e}"
 
 
-def audio_files(base: Path | str | None = None) -> List[Path]:
+def audio_files(base: Path | str | None = None, settings=None) -> List[Path]:
     try:
-        return sorted(p for p in audio_dir(base).glob("session_*.wav") if p.is_file())
+        return sorted(p for p in audio_dir(base, settings).glob("session_*.wav") if p.is_file())
     except OSError:
         return []
 
 
-def total_audio_bytes(base: Path | str | None = None) -> int:
+def total_audio_bytes(base: Path | str | None = None, settings=None) -> int:
     """Disk used by saved audio — what the user needs to see before deciding."""
     total = 0
-    for path in audio_files(base):
+    for path in audio_files(base, settings):
         try:
             total += path.stat().st_size
         except OSError:
@@ -194,10 +195,10 @@ def total_audio_bytes(base: Path | str | None = None) -> int:
     return total
 
 
-def delete_all_audio(base: Path | str | None = None) -> Tuple[int, int]:
+def delete_all_audio(base: Path | str | None = None, settings=None) -> Tuple[int, int]:
     """Delete every saved recording. Returns (files removed, bytes freed)."""
     files = bytes_freed = 0
-    for path in audio_files(base):
+    for path in audio_files(base, settings):
         try:
             size = path.stat().st_size
             path.unlink()
