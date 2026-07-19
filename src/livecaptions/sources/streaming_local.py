@@ -113,6 +113,11 @@ class StreamingTranscriptionSource(TranscriptionSource):
         self._thread = None
         self._audio_error: Optional[BaseException] = None
         self._stream_time = 0.0        # total 16k audio fed — the shared global clock
+        self._gain = None
+        if getattr(settings, "auto_gain", True):
+            from ..capture.gain import AutoGain
+            self._gain = AutoGain(target_rms=getattr(settings, "auto_gain_target_rms", 0.05),
+                                  max_gain=getattr(settings, "auto_gain_max", 30.0))
         self.dropped_blocks = 0
         self.finished = threading.Event()
 
@@ -191,6 +196,11 @@ class StreamingTranscriptionSource(TranscriptionSource):
                     self._monitor(Segmenter.block_rms(b.samples))
                 chunk = self._resampler.resample_chunk(b.samples.astype(np.float32))
                 if chunk.size:
+                    if self._gain is not None:
+                        # After resampling, before the VAD: Windows already applied the
+                        # output volume, so turning the speakers down otherwise drops
+                        # speech below the VAD threshold and captions stop.
+                        chunk = self._gain(chunk)
                     self._online.insert_audio(chunk)
                     if self._diarizer is not None:
                         self._diarizer.feed(chunk)      # same audio, same clock

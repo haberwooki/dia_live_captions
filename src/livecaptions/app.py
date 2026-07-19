@@ -288,6 +288,10 @@ def run(args) -> None:
                                        saved_ordinal=settings.loopback_ordinal)
         finally:
             p.terminate()
+        # Log the endpoint. Duplicate-named devices make "no captions" ambiguous, and
+        # an idle loopback yields no data at all rather than an error, so without this
+        # line the log cannot distinguish "wrong device" from "nothing playing".
+        print(f"Capturing from: {dev['name']}  (index {dev['index']})")
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
         return cls(dev, block_sec=settings.block_sec)
 

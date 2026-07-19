@@ -4,16 +4,30 @@ Drives the real run_overlay with a stub live source and walks the full state
 machine, asserting that each control does what its label promises and that the
 app survives all of it (the v0.1.6 bug class).
 """
+import pathlib
 import sys
+import tempfile
 import threading
 
 sys.argv = ["smoke"]
 
 from PySide6 import QtCore, QtWidgets  # noqa: E402
 
+from livecaptions import config as _config  # noqa: E402
+
+# Never read or write the real config: this test opens the Settings window and
+# clicks things, and switching a tab alone persists a key. An earlier run wrote to
+# the user's live settings, which is exactly the kind of surprise a test must not
+# cause. Redirect to a throwaway file BEFORE anything reads it.
+_tmp = pathlib.Path(tempfile.mkdtemp(prefix="lc-smoke-")) / "config.toml"
+_config.CONFIG_DIR, _config.CONFIG_PATH = _tmp.parent, _tmp
+
 from livecaptions.config import Settings  # noqa: E402
+from livecaptions.ui import settings as _settings_ui  # noqa: E402
 from livecaptions.ui.overlay import run_overlay  # noqa: E402
 from livecaptions.ui.settings import SettingsWindow  # noqa: E402
+
+_settings_ui.save_settings = _config.save_settings   # picks up the redirected path
 
 built = []
 released = []
@@ -49,6 +63,7 @@ factory.release_model = lambda: released.append(1)
 
 settings = Settings()
 settings.open_settings_on_launch = True
+settings.start_captions_on_launch = True   # this test is about the running pipeline
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 

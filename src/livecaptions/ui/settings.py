@@ -8,6 +8,7 @@ and take effect on the next launch — the window says so.
 from __future__ import annotations
 
 import sys
+import threading
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -41,6 +42,7 @@ class SettingsWindow(QtWidgets.QWidget):
     _check_done = QtCore.Signal(object)   # {"tag", "url", "err"}
     _dl_progress = QtCore.Signal(int)
     _dl_done = QtCore.Signal(str)         # "" on success, else an error string
+    _detect_done = QtCore.Signal(object)  # device probe results, marshalled to the GUI thread
 
     def __init__(self, settings, overlay=None, quit_on_close: bool = False, on_restart=None,
                  transport=None):
@@ -76,6 +78,7 @@ class SettingsWindow(QtWidgets.QWidget):
         self._check_done.connect(self._on_check_done)
         self._dl_progress.connect(self._on_dl_progress)
         self._dl_done.connect(self._on_dl_done)
+        self._detect_done.connect(self._on_detect_done)
 
         self._restart_note = QtWidgets.QLabel("")
         self._restart_note.setWordWrap(True)
@@ -215,25 +218,94 @@ class SettingsWindow(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout(g)
         self._dev = QtWidgets.QComboBox()
         lbs, default_idx = _loopbacks()
-        self._dev.addItem("Default output (auto)", userData=None)
+        self._dev.addItem("Default output (auto — follows Windows)", userData=None)
+        from ..capture.devices import name_ordinal
         for lb in lbs:
-            tag = "  ← default" if lb["index"] == default_idx else ""
-            self._dev.addItem(f"{lb['name']} (index {lb['index']}){tag}", userData=lb)
-        # preselect the saved device by name+ordinal
+            tag = "  ← Windows default" if lb["index"] == default_idx else ""
+            # Duplicate names are the norm (two monitors on one GPU), so number them:
+            # "(index 14)" alone tells the user nothing about which is which.
+            ordinal = name_ordinal(lbs, lb)
+            dup = sum(1 for o in lbs if o["name"] == lb["name"]) > 1
+            label = f"{lb['name']}{f'  #{ordinal + 1}' if dup else ''}{tag}"
+            self._dev.addItem(label, userData=lb)
+
+        # Preselect by name AND ordinal. Matching on name alone always landed on the
+        # first duplicate, so the panel showed the wrong device as selected and there
+        # was no way to tell the two apart.
         saved = getattr(self._settings, "loopback_name", None)
+        saved_ord = int(getattr(self._settings, "loopback_ordinal", 0) or 0)
         if saved:
             for i in range(1, self._dev.count()):
-                if self._dev.itemData(i) and self._dev.itemData(i)["name"] == saved:
+                d = self._dev.itemData(i)
+                if d and d["name"] == saved and name_ordinal(lbs, d) == saved_ord:
                     self._dev.setCurrentIndex(i)
                     break
         self._dev.currentIndexChanged.connect(self._on_device)
         form.addRow("Capture from:", self._dev)
-        hint = QtWidgets.QLabel("Pick the output your audio actually plays through "
-                                "(useful when two devices share a name).")
+
+        self._detect = QtWidgets.QPushButton("Find the device that's playing audio")
+        self._detect.clicked.connect(self._on_detect)
+        form.addRow(self._detect)
+        self._detect_note = QtWidgets.QLabel("")
+        self._detect_note.setWordWrap(True)
+        self._detect_note.setStyleSheet("color: gray; font-size: 11px;")
+        form.addRow(self._detect_note)
+
+        hint = QtWidgets.QLabel(
+            "Captures what your PC plays — never your microphone. Turning the volume "
+            "down is fine (measured: still accurate at 1%), but muting sends silence, "
+            "and there is nothing to transcribe in silence.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray; font-size: 11px;")
         form.addRow(hint)
         return g
+
+    # ---- "which of these identical devices is the live one?" ----
+    def _on_detect(self) -> None:
+        """Listen to every endpoint for a few seconds and select the one with sound.
+
+        This is the only reliable way to tell duplicate-named devices apart: an idle
+        loopback endpoint emits no data at all, so it is indistinguishable from a
+        broken app until you actually listen to it.
+        """
+        self._detect.setEnabled(False)
+        self._detect_note.setText("Listening… play some audio for a few seconds.")
+
+        def work():
+            try:
+                from ..capture.probe import SIGNAL_RMS, probe_loopbacks
+                results = probe_loopbacks(4.0)
+                self._detect_done.emit({"results": results, "floor": SIGNAL_RMS})
+            except Exception as e:
+                self._detect_done.emit({"err": f"{type(e).__name__}: {e}"})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @QtCore.Slot(object)
+    def _on_detect_done(self, payload: dict) -> None:
+        self._detect.setEnabled(True)
+        if payload.get("err"):
+            self._detect_note.setText(f"Couldn't check the devices: {payload['err']}")
+            return
+        results = payload.get("results") or []
+        best = results[0] if results else None
+        if not best or best[1] < payload["floor"]:
+            self._detect_note.setText(
+                "No sound on any output. Start playing something and try again — "
+                "and check the volume isn't turned right down.")
+            return
+        dev, rms, _ = best
+        for i in range(1, self._dev.count()):
+            d = self._dev.itemData(i)
+            if d and d["index"] == dev["index"]:
+                if self._dev.currentIndex() == i:
+                    self._detect_note.setText(
+                        f"Already using the right one — “{dev['name']}” has audio.")
+                else:
+                    self._dev.setCurrentIndex(i)      # fires _on_device: saves + applies
+                    self._detect_note.setText(f"Switched to the output with audio "
+                                              f"(level {rms:.3f}).")
+                return
 
     def _on_device(self, i: int) -> None:
         lb = self._dev.itemData(i)

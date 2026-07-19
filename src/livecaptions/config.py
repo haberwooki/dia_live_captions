@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     start_captions_on_launch: bool = True  # begin capturing immediately, or wait for Start
     settings_tab: int = 0                 # reopen the control panel on the tab you left on
 
+    # Windows applies the output volume before we capture, so quiet playback would
+    # otherwise stop triggering the VAD. This scales it back up (mute is still mute).
+    auto_gain: bool = True
+    auto_gain_target_rms: float = 0.05
+    auto_gain_max: float = 30.0
+
     # global hotkeys (Win32 RegisterHotKey). Remap here if another app claims one.
     hotkey_toggle: str = "ctrl+alt+c"     # show/hide the overlay
     hotkey_pause: str = "ctrl+alt+p"      # pause/resume captions
