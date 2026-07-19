@@ -148,3 +148,60 @@ def test_declining_a_rename_changes_nothing(tab, monkeypatch):
     speakers = [r["speaker"] for r in tab._ensure().execute("SELECT speaker FROM utterances")]
     assert "Mike" not in speakers
     assert "Renamed 0 speaker(s)" in tab._name_status.text()
+
+
+class TestOneClickNotes:
+    """With nothing configured, the Notes button must still be the thing you click.
+
+    The whole point: no provider dropdown, no port, no model name typed. If a local
+    server is running, one click finds it, asks once, and proceeds.
+    """
+
+    def test_notes_button_is_clickable_with_nothing_configured(self, tab):
+        assert tab._kind.currentIndex() == 0, "precondition: unconfigured"
+        assert tab._notes_btn.isEnabled(), (
+            "disabled the one button that needs no setup")
+
+    def test_one_click_finds_a_local_model_and_configures_it(self, tab, monkeypatch):
+        from livecaptions.llm import discover as D
+        monkeypatch.setattr(D, "autoconfigure", lambda *a, **k: {
+            "llm_provider": "local", "llm_base_url": "http://localhost:11434/v1",
+            "llm_model": "llama3.1:8b", "_server": "Ollama"})
+        asked = []
+        monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda p, t, text, *a, **k: asked.append(text)
+                                         or QtWidgets.QMessageBox.StandardButton.Yes))
+        assert tab._autoconfigure_or_explain() == "local"
+
+        saved = config.Settings()
+        assert saved.llm_provider == "local"
+        assert saved.llm_model == "llama3.1:8b"
+        assert "Ollama" in asked[0] and "llama3.1:8b" in asked[0]
+        assert "stays on this machine" in asked[0], "must say where the data goes"
+
+    def test_declining_changes_nothing(self, tab, monkeypatch):
+        from livecaptions.llm import discover as D
+        monkeypatch.setattr(D, "autoconfigure", lambda *a, **k: {
+            "llm_provider": "local", "llm_base_url": "http://localhost:11434/v1",
+            "llm_model": "llama3.1:8b", "_server": "Ollama"})
+        monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.No))
+        assert tab._autoconfigure_or_explain() is None
+        assert config.Settings().llm_provider == "none", "configured without consent"
+
+    def test_no_local_server_explains_what_to_do(self, tab, monkeypatch):
+        """A dead end here is where someone gives up, so it must name the fix."""
+        from livecaptions.llm import discover as D
+        monkeypatch.setattr(D, "autoconfigure", lambda *a, **k: None)
+        assert tab._autoconfigure_or_explain() is None
+        msg = tab._notes_status.text()
+        assert "Ollama" in msg and "ollama pull" in msg, f"unhelpful: {msg}"
+        assert config.Settings().llm_provider == "none"
+
+    def test_a_broken_discovery_does_not_look_like_a_crash(self, tab, monkeypatch):
+        from livecaptions.llm import discover as D
+        def boom(*a, **k):
+            raise RuntimeError("network stack on fire")
+        monkeypatch.setattr(D, "autoconfigure", boom)
+        assert tab._autoconfigure_or_explain() is None
+        assert "Couldn't look for a local model" in tab._notes_status.text()

@@ -137,3 +137,68 @@ def test_from_settings_reads_the_configured_provider():
 def test_local_presets_cover_the_common_servers():
     assert "11434" in P.LOCAL_PRESETS["Ollama"]
     assert "1234" in P.LOCAL_PRESETS["LM Studio"]
+
+
+class TestRealServerQuirks:
+    """Rungs added after testing against a REAL local server (LM Studio, qwen3.5-9b).
+
+    The two-rung fallback looked fine in theory and failed on the first real server
+    it met: strict json_schema returned HTTP 200 with EMPTY content, and json_object
+    was rejected outright ("must be 'json_schema' or 'text'"). Plain text with the
+    schema in the prompt was the only thing that worked — so it is the floor.
+    """
+
+    def _provider(self, monkeypatch, responses):
+        cfg = P.ProviderConfig(kind="local", model="m", base_url="http://localhost:1234/v1")
+        prov = P.OpenAICompatProvider(cfg)
+        seen = []
+
+        def fake_post(payload, timeout):
+            seen.append(payload["response_format"]["type"])
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return {"choices": [{"message": {"content": item}}]}
+        monkeypatch.setattr(prov, "_post", fake_post)
+        return prov, seen
+
+    def test_an_empty_reply_falls_through_instead_of_being_an_error(self, monkeypatch):
+        """LM Studio answers json_schema with 200 and no content. Reporting that as
+        'reply didn't match the format' would be a dead end for every local user."""
+        prov, seen = self._provider(monkeypatch, [
+            "", json.dumps({"name": "a", "count": 1})])
+        assert prov.complete("s", "u", Answer).name == "a"
+        assert seen[0] == "json_schema"
+
+    def test_text_mode_is_the_last_resort_and_is_reached(self, monkeypatch):
+        prov, seen = self._provider(monkeypatch, [
+            "",                                                   # json_schema: empty
+            P.LLMError("Server returned 400. 'response_format.type' must be "
+                       "'json_schema' or 'text'"),                # json_object: refused
+            json.dumps({"name": "z", "count": 3})])               # text: works
+        out = prov.complete("s", "u", Answer)
+        assert (out.name, out.count) == ("z", 3)
+        assert seen == ["json_schema", "json_object", "text"], seen
+
+    def test_whitespace_only_counts_as_empty(self, monkeypatch):
+        prov, _ = self._provider(monkeypatch, ["   \n  ", json.dumps({"name": "q", "count": 0})])
+        assert prov.complete("s", "u", Answer).name == "q"
+
+
+def test_timeout_is_configurable_because_reasoning_models_are_slow():
+    """Measured: 133s for an EIGHT-LINE transcript on a local reasoning model, which
+    emitted 13,776 characters of reasoning first. The 120s default failed outright."""
+    cfg = P.ProviderConfig(kind="local", model="m", base_url="http://x/v1")
+    assert cfg.timeout == 120.0, "default should still suit a connectivity check"
+    cfg.timeout = 900.0
+    used = {}
+
+    prov = P.OpenAICompatProvider(cfg)
+
+    def fake_post(payload, timeout):
+        used["t"] = timeout
+        return {"choices": [{"message": {"content": json.dumps({"name": "a", "count": 1})}}]}
+
+    prov._post = fake_post
+    prov.complete("s", "u", Answer)
+    assert used["t"] == 900.0, "long jobs must be able to raise the timeout"

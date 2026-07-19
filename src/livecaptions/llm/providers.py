@@ -40,6 +40,11 @@ class ProviderConfig:
     model: str = ""
     base_url: str = ""
     api_key: Optional[str] = None
+    #: Seconds to wait for a reply. The default suits a connectivity check; long
+    #: jobs raise it. Measured: a local reasoning model (qwen3.5-9b via LM Studio)
+    #: took 133 s on an EIGHT-LINE transcript, emitting 13,776 characters of
+    #: reasoning before the answer — a real session needs far more headroom.
+    timeout: float = 120.0
 
     @property
     def is_local(self) -> bool:
@@ -140,7 +145,8 @@ class OpenAICompatProvider(Provider):
             raise LLMError(f"{base} didn't respond in time.") from e
 
     def complete(self, system: str, user: str, schema: Type[BaseModel],
-                 timeout: float = 120.0) -> BaseModel:
+                 timeout: Optional[float] = None) -> BaseModel:
+        timeout = self.config.timeout if timeout is None else timeout
         if not self.config.model:
             raise LLMError("No model name set for this provider.")
         js = schema.model_json_schema()
@@ -150,23 +156,37 @@ class OpenAICompatProvider(Provider):
                          {"role": "user", "content": user}],
             "temperature": 0,
         }
-        # Strict schema first; many servers (older Ollama, some proxies) don't
-        # support it, so fall back to plain JSON mode with the schema in the prompt.
+        # Three rungs, because local servers disagree about all of this. Measured
+        # against LM Studio
+        # (qwen3.5-9b): strict json_schema returns HTTP 200 with EMPTY content, and
+        # json_object is rejected outright with "must be 'json_schema' or 'text'".
+        # Plain text with the schema in the prompt is the only rung that worked
+        # there, and it works everywhere else too — so it must exist as the floor.
+        schema_prompt = [
+            {"role": "system",
+             "content": f"{system}\n\nReply with JSON matching this schema, and "
+                        f"nothing else:\n{json.dumps(js)}"},
+            {"role": "user", "content": user},
+        ]
         attempts = [
             dict(base_payload, response_format={
                 "type": "json_schema",
                 "json_schema": {"name": schema.__name__, "strict": True, "schema": js}}),
             dict(base_payload, response_format={"type": "json_object"},
-                 messages=[{"role": "system",
-                            "content": f"{system}\n\nReply with JSON matching this schema:\n"
-                                       f"{json.dumps(js)}"},
-                           {"role": "user", "content": user}]),
+                 messages=schema_prompt),
+            dict(base_payload, response_format={"type": "text"}, messages=schema_prompt),
         ]
         last: Optional[Exception] = None
         for payload in attempts:
             try:
                 data = self._post(payload, timeout)
                 content = data["choices"][0]["message"]["content"]
+                if not (content or "").strip():
+                    # A 200 with no content is a rung that silently doesn't work
+                    # (LM Studio does this for json_schema). Treat it as a failure
+                    # so the next rung is tried, rather than reporting a confusing
+                    # "reply didn't match the format" for an empty reply.
+                    raise LLMError("the server returned an empty reply")
                 return schema.model_validate_json(_strip_fence(content))
             except LLMError as e:
                 last = e

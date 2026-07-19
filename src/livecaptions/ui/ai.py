@@ -96,9 +96,14 @@ class AITab(QtWidgets.QWidget):
         self._keynote.setStyleSheet("color: gray; font-size: 11px;")
         form.addRow(self._keynote)
 
+        btns = QtWidgets.QHBoxLayout()
+        self._auto = QtWidgets.QPushButton("Find a local model")
+        self._auto.clicked.connect(self._on_autodetect)
+        btns.addWidget(self._auto)
         self._test = QtWidgets.QPushButton("Test connection")
         self._test.clicked.connect(self._on_test)
-        form.addRow(self._test)
+        btns.addWidget(self._test)
+        form.addRow(btns)
 
         self._status = QtWidgets.QLabel("")
         self._status.setWordWrap(True)
@@ -132,6 +137,10 @@ class AITab(QtWidgets.QWidget):
         self._key.setEnabled(openai or anth)
         self._test.setEnabled(configured)
         self._name_btn.setEnabled(configured) if hasattr(self, "_name_btn") else None
+        # Notes stays clickable with nothing configured: that click is what finds a
+        # local model. Disabling it would hide the one path that needs no setup.
+        if hasattr(self, "_notes_btn"):
+            self._notes_btn.setEnabled(True)
 
         stored = self._stored_key_hint(kind)
         if local:
@@ -145,7 +154,10 @@ class AITab(QtWidgets.QWidget):
             self._keynote.setText("Works with OpenAI, OpenRouter, Groq, Together and "
                                   "anything else speaking the same API. " + stored)
         else:
-            self._keynote.setText("AI features are off. Nothing is sent anywhere.")
+            self._keynote.setText(
+                "AI features are off — nothing is sent anywhere. If you run Ollama or "
+                "LM Studio, “Find a local model” sets everything up from what is "
+                "already running; there is nothing to type and no key to get.")
 
     def _stored_key_hint(self, kind: str) -> str:
         try:
@@ -245,6 +257,9 @@ class AITab(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self._notes_btn = QtWidgets.QPushButton("Generate notes…")
         self._notes_btn.clicked.connect(self._on_notes)
+        self._notes_btn.setToolTip(
+            "If no model is set up yet, this finds a local one first — nothing to "
+            "configure.")
         row.addWidget(self._notes_btn)
         copy = QtWidgets.QPushButton("Copy")
         copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(
@@ -267,6 +282,54 @@ class AITab(QtWidgets.QWidget):
         self._notes_status.setStyleSheet("color: gray; font-size: 11px;")
         v.addWidget(self._notes_status)
         return g
+
+    def _autoconfigure_or_explain(self) -> Optional[str]:
+        """Set up a local model from what is already running, or say what to do.
+
+        Returns the provider kind on success, None if the user must act. Runs on the
+        GUI thread on purpose: it is two HTTP calls to localhost with a short
+        timeout, and a spinner for that would be more machinery than the wait costs.
+        """
+        self._notes_status.setText("Looking for a local model…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            from ..llm.discover import autoconfigure
+            found = autoconfigure()
+        except Exception as e:
+            self._notes_status.setText(f"Couldn't look for a local model: {e}")
+            return None
+        if not found:
+            self._notes_status.setText(
+                "No AI model set up. Either install Ollama (ollama.com) and run "
+                "'ollama pull llama3.1' — then this button works with nothing else "
+                "to configure — or choose a provider and paste a key above.")
+            return None
+
+        server = found.pop("_server", "a local server")
+        ok = QtWidgets.QMessageBox.question(
+            self, "Use the model you're already running?",
+            f"Found {server} at {found['llm_base_url']} with “{found['llm_model']}”.\n\n"
+            f"Use it for notes? Everything stays on this machine.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ok != QtWidgets.QMessageBox.StandardButton.Yes:
+            self._notes_status.setText("Cancelled — nothing was changed.")
+            return None
+
+        self._persist(**found)
+        self._kind.setCurrentIndex(_KIND_BY_INDEX.index("local"))
+        self._url.setText(found["llm_base_url"])
+        self._model.setText(found["llm_model"])
+        self._sync_fields()
+        self._notes_status.setText(f"Set up with {found['llm_model']} on {server}.")
+        return "local"
+
+    def _on_autodetect(self) -> None:
+        """The same setup, from the provider box, for people who look there first."""
+        if self._autoconfigure_or_explain():
+            self._status.setText(
+                f"Ready — {getattr(self._settings, 'llm_model', '')} running locally. "
+                f"Nothing you send to it leaves this machine.")
 
     def _show_existing_notes(self) -> None:
         """Show what was already generated for the selected session, so the user is
@@ -298,8 +361,13 @@ class AITab(QtWidgets.QWidget):
             return
         kind = str(getattr(self._settings, "llm_provider", "none") or "none")
         if kind == "none":
-            self._notes_status.setText("Choose a model provider above first.")
-            return
+            # One click should work. Rather than sending the user up to the provider
+            # box to guess a port and type an exact model name, look for a local
+            # server first — if one is running it can be configured from what it
+            # reports about itself.
+            kind = self._autoconfigure_or_explain()
+            if kind is None:
+                return
         conn = self._ensure()
         max_chars = int(getattr(self._settings, "notes_max_chars", 120_000) or 120_000)
         try:
@@ -321,12 +389,18 @@ class AITab(QtWidgets.QWidget):
             return
 
         self._notes_btn.setEnabled(False)
-        self._notes_status.setText("Working… this reads the whole session, so give it a moment.")
+        self._notes_status.setText(
+            "Working… a local model reads the whole session before answering, which "
+            "can take several minutes — reasoning models think at length first. The "
+            "app keeps captioning while it works.")
 
         def work():
             try:
                 from ..notes import generate_notes
                 prov = P.from_settings(self._settings, P.resolve_api_key(kind))
+                # Measured 133 s for an eight-line transcript on a local reasoning
+                # model; the 120 s default would fail every real session.
+                prov.config.timeout = 900.0
                 notes = generate_notes(conn, int(sid), prov, consented=True,
                                        max_chars=max_chars)
                 self._notes_done.emit({"notes": notes})
