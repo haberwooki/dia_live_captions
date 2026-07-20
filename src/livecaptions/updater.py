@@ -17,7 +17,12 @@ from typing import Callable, Optional, Tuple
 from . import __version__
 
 REPO = "haberwooki/dia_live_captions"
-_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+# The LIST, not /releases/latest. GitHub's "latest" pointer follows PUBLISH time,
+# not version number: when a service outage let v0.4.0 finish building before
+# v0.3.4, v0.3.4 published later and grabbed the "latest" pointer, so the update
+# button offered an OLDER version and never saw v0.4.0. We sort by version
+# ourselves so out-of-order publishing can never mislead the updater again.
+_API = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 
 
 def current_version() -> str:
@@ -28,16 +33,34 @@ def _tuple(v: str) -> tuple:
     return tuple(int(x) for x in v.strip().lstrip("vV").split(".") if x.isdigit())
 
 
+def _installer_url(release: dict) -> Optional[str]:
+    return next((a["browser_download_url"] for a in release.get("assets", [])
+                 if a.get("name", "").lower().endswith(".exe")), None)
+
+
 def latest_release(timeout: float = 10.0) -> Tuple[str, Optional[str]]:
-    """(tag, installer_url) of the latest GitHub release. Raises on network error."""
+    """(tag, installer_url) of the HIGHEST-VERSION release with an installer.
+
+    Highest by version number, not by publish time — see _API. Drafts and
+    prereleases are skipped, and a release without an .exe asset (a build that
+    failed to upload) is passed over so the updater never points at a dead link.
+    """
     req = urllib.request.Request(_API, headers={
         "Accept": "application/vnd.github+json", "User-Agent": "livecaptions-updater"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
-    tag = data.get("tag_name", "")
-    url = next((a["browser_download_url"] for a in data.get("assets", [])
-                if a.get("name", "").lower().endswith(".exe")), None)
-    return tag, url
+        releases = json.load(r)
+
+    best_tag, best_url, best_ver = "", None, ()
+    for rel in releases:
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        url = _installer_url(rel)
+        if not url:
+            continue
+        ver = _tuple(rel.get("tag_name", ""))
+        if ver > best_ver:
+            best_ver, best_tag, best_url = ver, rel.get("tag_name", ""), url
+    return best_tag, best_url
 
 
 def is_newer(tag: str) -> bool:
