@@ -18,6 +18,21 @@ from ..config import save_settings
 _MODELS = ["tiny.en", "base.en", "small.en", "medium", "large-v3"]
 
 
+def _input_devices() -> List[dict]:
+    """Microphones, for the 'caption what I say' picker. Never raises: a machine
+    with no microphone should show an empty list, not a broken tab."""
+    try:
+        import pyaudiowpatch as pa
+        from ..capture.mixed import input_devices
+        p = pa.PyAudio()
+        try:
+            return input_devices(p)
+        finally:
+            p.terminate()
+    except Exception:
+        return []
+
+
 def _loopbacks() -> tuple[List[dict], Optional[int]]:
     """(loopback device infos, index of the default output's loopback)."""
     try:
@@ -290,13 +305,50 @@ class SettingsWindow(QtWidgets.QWidget):
         form.addRow(self._detect_note)
 
         hint = QtWidgets.QLabel(
-            "Captures what your PC plays — never your microphone. Turning the volume "
-            "down is fine (measured: still accurate at 1%), but muting sends silence, "
-            "and there is nothing to transcribe in silence.")
+            "Captures what your PC plays. Turning the volume down is fine (measured: "
+            "still accurate at 1%), but muting sends silence, and there is nothing to "
+            "transcribe in silence.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray; font-size: 11px;")
         form.addRow(hint)
+
+        # --- your own voice: a second capture device, mixed in ---
+        self._mic = QtWidgets.QCheckBox("Also caption what I say (uses the microphone)")
+        self._mic.setChecked(bool(getattr(self._settings, "capture_mic", False)))
+        self._mic.toggled.connect(self._on_mic)
+        form.addRow(self._mic)
+
+        self._mic_dev = QtWidgets.QComboBox()
+        self._mic_dev.addItem("Default microphone (follows Windows)", userData="")
+        for d in _input_devices():
+            self._mic_dev.addItem(d["name"], userData=d["name"])
+        saved_mic = str(getattr(self._settings, "mic_device_name", "") or "")
+        idx = self._mic_dev.findData(saved_mic)
+        self._mic_dev.setCurrentIndex(idx if idx >= 0 else 0)
+        self._mic_dev.currentIndexChanged.connect(
+            lambda i: self._persist(mic_device_name=self._mic_dev.itemData(i) or "")
+            or self._apply_pipeline("microphone"))
+        form.addRow("Microphone:", self._mic_dev)
+
+        mic_hint = QtWidgets.QLabel(
+            "Off by default — opening a microphone is a bigger step than capturing "
+            "what your speakers already play. Your lines are labelled “You”, and that "
+            "label is measured (the sound arrived on the mic), not guessed. On "
+            "speakers rather than headphones the mic also hears the other side, so "
+            "only clearly-louder-on-the-mic speech is attributed to you.")
+        mic_hint.setWordWrap(True)
+        mic_hint.setStyleSheet("color: gray; font-size: 11px;")
+        form.addRow(mic_hint)
+        self._sync_mic_enabled()
         return g
+
+    def _sync_mic_enabled(self) -> None:
+        self._mic_dev.setEnabled(self._mic.isChecked())
+
+    def _on_mic(self, on: bool) -> None:
+        self._persist(capture_mic=on)
+        self._sync_mic_enabled()
+        self._apply_pipeline("microphone")
 
     # ---- "which of these identical devices is the live one?" ----
     def _on_detect(self) -> None:

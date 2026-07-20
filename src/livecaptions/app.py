@@ -293,8 +293,39 @@ def run(args) -> None:
         # an idle loopback yields no data at all rather than an error, so without this
         # line the log cannot distinguish "wrong device" from "nothing playing".
         print(f"Capturing from: {dev['name']}  (index {dev['index']})")
+
+        if getattr(settings, "capture_mic", False) and not args.blocking:
+            mic = _resolve_mic(settings)
+            if mic is not None:
+                from .capture.mixed import MixedSource
+                print(f"Also capturing microphone: {mic['name']}  (index {mic['index']})")
+                return MixedSource(dev, mic, block_sec=settings.block_sec,
+                                   mic_gain=float(getattr(settings, "mic_gain", 1.0)))
+            # Losing your own voice is much better than losing captions entirely.
+            print("Microphone capture is on, but no usable microphone was found — "
+                  "continuing with system audio only.")
+
         cls = BlockingWasapiSource if args.blocking else WasapiLoopbackSource
         return cls(dev, block_sec=settings.block_sec)
+
+    def _resolve_mic(settings):
+        """The configured microphone, else the Windows default, else None."""
+        import pyaudiowpatch as pa
+        from .capture.mixed import default_input_device, input_devices
+        p = pa.PyAudio()
+        try:
+            wanted = str(getattr(settings, "mic_device_name", "") or "").strip()
+            if wanted:
+                for d in input_devices(p):
+                    if d["name"] == wanted:
+                        return d
+                print(f"Microphone {wanted!r} not found; using the default input.")
+            return default_input_device(p)
+        except Exception as e:
+            print(f"Couldn't open a microphone: {e}")
+            return None
+        finally:
+            p.terminate()
 
     def build_source():
         """(Re)build capture -> model -> transcription from current settings. Called

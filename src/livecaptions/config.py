@@ -108,6 +108,14 @@ class Settings(BaseSettings):
 
     # Windows applies the output volume before we capture, so quiet playback would
     # otherwise stop triggering the VAD. This scales it back up (mute is still mute).
+    # Caption your own voice too, by mixing the microphone into the captured stream.
+    # OFF by default: opening a microphone is a bigger privacy step than recording
+    # what the speakers already play, and it must be a deliberate choice.
+    capture_mic: bool = False
+    mic_device_name: str = ""             # blank = the Windows default input
+    mic_label: str = "You"                # how your own lines are labelled
+    mic_gain: float = 1.0
+
     auto_gain: bool = True
     auto_gain_target_rms: float = 0.05
     auto_gain_max: float = 30.0

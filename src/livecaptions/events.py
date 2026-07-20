@@ -17,7 +17,7 @@ partials) are reserved: M1 always emits `speaker=None`, `is_final=True`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -30,6 +30,11 @@ class AudioBlock:
     samples: np.ndarray
     rate: int
     t: float = 0.0          # source-relative start time (seconds), monotonic
+    #: Loudness of each capture device that fed this block, when more than one did
+    #: ({"system": rms, "mic": rms}). This is how a line gets attributed to "You"
+    #: with certainty instead of being guessed at by the diarizer: we know which
+    #: device the sound arrived on. Empty for a single-device capture.
+    levels: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:

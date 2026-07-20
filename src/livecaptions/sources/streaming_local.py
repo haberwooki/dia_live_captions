@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 import zlib
+from collections import deque
 from typing import List, Optional
 
 import numpy as np
@@ -114,6 +115,10 @@ class StreamingTranscriptionSource(TranscriptionSource):
         self._audio_error: Optional[BaseException] = None
         self._stream_time = 0.0        # total 16k audio fed — the shared global clock
         self._recorder = None       # set by attach_recorder() when saving is on
+        # (stream_time, system_rms, mic_rms) per block, when a microphone is mixed in.
+        # Bounded: only the recent past can overlap a line still being finalised.
+        self._levels: "deque" = deque(maxlen=4000)
+        self._self_label = str(getattr(settings, "mic_label", "You") or "You")
         self._gain = None
         if getattr(settings, "auto_gain", True):
             from ..capture.gain import AutoGain
@@ -145,7 +150,13 @@ class StreamingTranscriptionSource(TranscriptionSource):
         if not text:
             return
         t_start, t_end = words[0][0], words[-1][1]
-        if speaker is None and self._diarizer is not None:
+        # Your own voice is KNOWN, not guessed: it arrived on the microphone rather
+        # than the render stream. That beats the diarizer for this one speaker, so it
+        # takes precedence over it.
+        mine = self._spoken_by_me(t_start, t_end)
+        if mine:
+            speaker = self._self_label
+        elif speaker is None and self._diarizer is not None:
             speaker = self._diarizer.speaker_at(t_start, t_end)
         if os.environ.get("LC_STREAM_DEBUG"):
             who = f"{speaker} " if speaker else ""
@@ -154,6 +165,26 @@ class StreamingTranscriptionSource(TranscriptionSource):
         self._on_event(TranscriptEvent(
             text=text, source=self.source_id, speaker=speaker,
             t_start=t_start, t_end=t_end, is_final=is_final))
+
+    #: How much louder the microphone must be than the system stream before a line is
+    #: called yours. Well above 1.0 on purpose: on speakers the mic also picks up the
+    #: far end, and mislabelling THEIR words as yours is the worse error — a missed
+    #: "You" just falls back to normal captioning.
+    MIC_DOMINANCE = 2.5
+    #: Below this the microphone is only carrying room noise, whatever the ratio says.
+    MIC_FLOOR = 0.004
+
+    def _spoken_by_me(self, t_start: float, t_end: float) -> bool:
+        """Was the microphone the loud device while these words were said?"""
+        if not self._levels:
+            return False
+        window = [(sys_rms, mic_rms) for t, sys_rms, mic_rms in self._levels
+                  if t_start <= t <= t_end]
+        if not window:
+            return False
+        mic = max(m for _, m in window)
+        system = max(s for s, _ in window)
+        return mic >= self.MIC_FLOOR and mic >= system * self.MIC_DOMINANCE
 
     def _word_speaker(self, word) -> Optional[str]:
         if self._diarizer is None:
@@ -197,6 +228,12 @@ class StreamingTranscriptionSource(TranscriptionSource):
                     self._monitor(Segmenter.block_rms(b.samples))
                 chunk = self._resampler.resample_chunk(b.samples.astype(np.float32))
                 if chunk.size:
+                    if b.levels:
+                        # Same clock as the word timestamps, so a finished line can
+                        # ask which device was loud while it was being spoken.
+                        self._levels.append((self._stream_time,
+                                             float(b.levels.get("system", 0.0)),
+                                             float(b.levels.get("mic", 0.0))))
                     if self._recorder is not None:
                         # Record BEFORE auto-gain: the saved WAV should be what was
                         # actually played, not what we amplified for the recogniser.

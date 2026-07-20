@@ -4,7 +4,7 @@
 > read this file and continue with zero re-explanation. Keep it under ~150 lines —
 > move finished history to the archive, don't let it grow forever.
 
-**Last updated:** 2026-07-19 — shipped v0.3.2; roadmap complete, awaiting real-world testing
+**Last updated:** 2026-07-19 — shipped v0.3.4; roadmap complete, awaiting real-world testing
 
 ## Goal
 
@@ -24,7 +24,10 @@ layer for speaker naming and session notes. Public repo:
 - v0.3.x: Speakers tab (live colours, offline re-diarization, audio-saving switch);
   Advanced tab (all tuning + hotkey remapping); optional audio recording; notes
   engine + UI; full session deletion (transcript + FTS + notes + audio).
-- 305 tests, plus manual scripts in `tests/manual/` (GUI smoke, transport, offline
+- v0.3.3–v0.3.4: one-click notes (local-server discovery), real-server response-format
+  fallback, and MICROPHONE capture — your own voice mixed into the same stream and
+  labelled "You" by measuring which device the sound arrived on.
+- 337 tests, plus manual scripts in `tests/manual/` (GUI smoke, transport, offline
   diarization ground-truth check).
 
 ### In progress / not verified by a human
