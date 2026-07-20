@@ -440,7 +440,67 @@ class SettingsWindow(QtWidgets.QWidget):
         self._lines.setValue(int(self._settings.overlay_max_lines))
         self._lines.valueChanged.connect(self._on_lines)
         form.addRow("Max lines:", self._lines)
+
+        # --- exact size, for people who want the pill to hold still ---
+        self._fixed_size = QtWidgets.QCheckBox("Use a fixed size")
+        cur_w = int(getattr(self._settings, "overlay_fixed_width", 0) or 0)
+        self._fixed_size.setChecked(cur_w > 0)
+        self._fixed_size.toggled.connect(self._on_fixed_size)
+        form.addRow(self._fixed_size)
+
+        scr = QtWidgets.QApplication.primaryScreen()
+        max_w = scr.availableGeometry().width() if scr else 3840
+        max_h = scr.availableGeometry().height() if scr else 2160
+
+        self._w_px = QtWidgets.QSpinBox()
+        self._w_px.setRange(120, max_w)
+        self._w_px.setSuffix(" px")
+        self._w_px.setValue(cur_w or int(max_w * 0.7))
+        self._w_px.valueChanged.connect(
+            lambda v: self._on_fixed_dim(width=v))
+        form.addRow("Width:", self._w_px)
+
+        self._h_px = QtWidgets.QSpinBox()
+        self._h_px.setRange(0, max_h)
+        self._h_px.setSpecialValueText("Fit the text")     # shown at 0
+        self._h_px.setSuffix(" px")
+        self._h_px.setValue(int(getattr(self._settings, "overlay_fixed_height", 0) or 0))
+        self._h_px.valueChanged.connect(
+            lambda v: self._on_fixed_dim(height=v))
+        form.addRow("Height:", self._h_px)
+
+        size_hint = QtWidgets.QLabel(
+            "Off, the pill grows and shrinks with each line, which is distracting to "
+            "read next to a video. A fixed width also sets where text wraps. Height "
+            "usually reads better left to fit the text — a tall fixed box is mostly "
+            "empty between lines.")
+        size_hint.setWordWrap(True)
+        size_hint.setStyleSheet("color: gray; font-size: 11px;")
+        form.addRow(size_hint)
+        self._sync_fixed_size()
         return g
+
+    def _sync_fixed_size(self) -> None:
+        on = self._fixed_size.isChecked()
+        self._w_px.setEnabled(on)
+        self._h_px.setEnabled(on)
+
+    def _on_fixed_size(self, on: bool) -> None:
+        # Unchecking stores 0 rather than forgetting the numbers, so the chosen size
+        # comes back when it is switched on again.
+        self._persist(overlay_fixed_width=self._w_px.value() if on else 0,
+                      overlay_fixed_height=self._h_px.value() if on else 0)
+        self._sync_fixed_size()
+        self._apply_appearance()
+
+    def _on_fixed_dim(self, width: int = None, height: int = None) -> None:
+        if not self._fixed_size.isChecked():
+            return
+        if width is not None:
+            self._persist(overlay_fixed_width=int(width))
+        if height is not None:
+            self._persist(overlay_fixed_height=int(height))
+        self._apply_appearance()
 
     def _paint_color_btn(self) -> None:
         self._color_btn.setText(self._color.name())

@@ -238,7 +238,13 @@ class OverlayWindow(QtWidgets.QWidget):
         wrapped as its own block so turns stay visually separate and colourable."""
         fm = QtGui.QFontMetrics(self._font)
         scr = self._target_screen().availableGeometry()
-        max_w = int(scr.width() * self._settings.overlay_width_frac) - 2 * self.PADDING
+        fixed_w = int(getattr(self._settings, "overlay_fixed_width", 0) or 0)
+        if fixed_w > 0:
+            # Wrap to the width the user chose, not to the share-of-screen default,
+            # or text would be laid out for one width and drawn in another.
+            max_w = fixed_w - 2 * self.PADDING - 6
+        else:
+            max_w = int(scr.width() * self._settings.overlay_width_frac) - 2 * self.PADDING
 
         if not self._finals and self._partial is None:
             return [("dim", None, ln) for ln in _wrap(self._status, fm, max_w)]
@@ -270,6 +276,14 @@ class OverlayWindow(QtWidgets.QWidget):
         h = line_h * len(rows) + 2 * self.PADDING
 
         scr = self._target_screen().availableGeometry()
+        # A fixed size keeps the pill from breathing in and out as lines change
+        # length, which is distracting to read alongside a video. 0 = size to fit.
+        fixed_w = int(getattr(self._settings, "overlay_fixed_width", 0) or 0)
+        fixed_h = int(getattr(self._settings, "overlay_fixed_height", 0) or 0)
+        if fixed_w > 0:
+            w = min(fixed_w, scr.width())
+        if fixed_h > 0:
+            h = min(fixed_h, scr.height())
         cx = scr.center().x() + self._offset.x()
         bottom = scr.bottom() - self.MARGIN_BOTTOM + self._offset.y()
         x = int(cx - w / 2)

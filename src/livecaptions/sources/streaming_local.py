@@ -119,6 +119,10 @@ class StreamingTranscriptionSource(TranscriptionSource):
         # Bounded: only the recent past can overlap a line still being finalised.
         self._levels: "deque" = deque(maxlen=4000)
         self._self_label = str(getattr(settings, "mic_label", "You") or "You")
+        self._sounds = None
+        if getattr(settings, "label_sounds", True):
+            from ..asr.sounds import SoundLabeller
+            self._sounds = SoundLabeller()
         self._gain = None
         if getattr(settings, "auto_gain", True):
             from ..capture.gain import AutoGain
@@ -259,10 +263,24 @@ class StreamingTranscriptionSource(TranscriptionSource):
             if not self._vad.has_speech(buf):
                 if pending:
                     cut_line()          # end of an utterance: commit the sentence
+                # Say what the audio actually is. A blank overlay is ambiguous —
+                # wrong device, stopped pipeline, muted output and "music, nobody
+                # talking" all look the same — and that ambiguity has cost real
+                # debugging time. Emitted as a PARTIAL so it shows without being
+                # written to the transcript: it is not something anyone said.
+                if self._sounds is not None:
+                    label = self._sounds.update(buf, self._stream_time)
+                    if label and self._on_event is not None:
+                        self._on_event(TranscriptEvent(
+                            text=label, source=self.source_id, speaker=None,
+                            t_start=self._stream_time, t_end=self._stream_time,
+                            is_final=False))
                 # drop the silence, but keep the global clock so word timestamps
                 # stay aligned with the diarizer's speaker timeline
                 self._online.reset(self._stream_time)
                 continue
+            if self._sounds is not None:
+                self._sounds.speech_started()
 
             committed, tail = self._online.process()
             for w in committed:

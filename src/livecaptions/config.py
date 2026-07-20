@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
     open_settings_on_launch: bool = True  # show the Settings window when the app starts
     overlay_movable: bool = False         # draggable (vs click-through); remembered across launches
+    # Pin the caption pill to an exact size. 0 = size to fit the text, which makes
+    # the pill change width line by line — steadier to read alongside a video when
+    # it holds still. Width also sets the wrap width.
+    overlay_fixed_width: int = 0
+    overlay_fixed_height: int = 0
+    #: Name what is playing when it isn't speech ("music", "sound"), so a blank
+    #: overlay stops being ambiguous between "broken" and "nobody is talking".
+    label_sounds: bool = True
     # What happens to captions when the app opens. "resume" honours how you left it,
     # which is why it is the default: a fixed checkbox cannot express "I pressed Start
     # last time, so start". "always" / "never" pin it either way.
