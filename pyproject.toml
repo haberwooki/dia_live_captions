@@ -1,11 +1,11 @@
-[build-system]
+﻿[build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "livecaptions"
-version = "0.4.2"
-description = "Cross-app live-captions overlay — local GPU transcription of Windows system audio."
+version = "0.4.3"
+description = "Cross-app live-captions overlay â€” local GPU transcription of Windows system audio."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -26,13 +26,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# NVIDIA GPU (CUDA 12) — cuBLAS for CTranslate2's GPU Whisper path. cuDNN ships
+# NVIDIA GPU (CUDA 12) â€” cuBLAS for CTranslate2's GPU Whisper path. cuDNN ships
 # INSIDE the ctranslate2 wheel, so it is NOT listed here; do not add
 # nvidia-cudnn-cu12. Skip this extra entirely on CPU-only machines.
 gpu = ["nvidia-cublas-cu12>=12.4,<13", "nvidia-cuda-runtime-cu12>=12.4,<13"]
 # The always-on-top caption overlay (M2) + global hotkeys. Terminal output works without it.
 gui = ["PySide6-Essentials>=6.6"]
-# Offline "who said what" — the sherpa-onnx backend: ONNX/CPU, no HF account.
+# Offline "who said what" â€” the sherpa-onnx backend: ONNX/CPU, no HF account.
 diarize = ["sherpa-onnx>=1.10"]
 # Best-quality offline diarization (pyannote) + live speaker colours (Streaming
 # Sortformer via NeMo). Pulls in torch (CPU-only wheel on Windows) + the NeMo

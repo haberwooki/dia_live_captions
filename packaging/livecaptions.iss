@@ -1,4 +1,4 @@
-; Inno Setup 6.3+ installer for live-captions.
+﻿; Inno Setup 6.3+ installer for live-captions.
 ; (6.3 is required: ArchitecturesAllowed=x64os below was renamed from "x64" in 6.3.)
 ; Build the PyInstaller bundle first (packaging/livecaptions.spec -> dist/LiveCaptions),
 ; then compile this with ISCC:  iscc packaging\livecaptions.iss
@@ -12,7 +12,7 @@
 ;    anything outside our own %LOCALAPPDATA%\live-captions tree.
 
 #define AppName "Live Captions"
-#define AppVersion "0.4.2"
+#define AppVersion "0.4.3"
 #define AppPublisher "live-captions"
 #define AppExeCli "livecaptions.exe"
 #define AppExeGui "livecaptions-overlay.exe"
@@ -34,7 +34,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={autopf}\LiveCaptions
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-; 64-bit only. x64os (not the deprecated "x64") blocks Arm64 cleanly — there are
+; 64-bit only. x64os (not the deprecated "x64") blocks Arm64 cleanly â€” there are
 ; no Arm64 CUDA wheels and emulated CPU inference won't be real-time.
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
@@ -42,7 +42,7 @@ MinVersion=10.0
 CloseApplications=yes
 RestartApplications=no
 OutputDir=..\Output
-; PATCH build: same AppId, so it upgrades an existing install in place — but its
+; PATCH build: same AppId, so it upgrades an existing install in place â€” but its
 ; SourceDir holds ONLY the two exes (+ internal.sha256), not the ~800 MB _internal
 ; tree. Inno's uninstall log is cumulative across same-AppId installs, so the
 ; _internal files the FULL installer logged stay tracked and are still removed on
@@ -57,7 +57,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExeGui}
-; The payload is >1 GB — allow room and show a realistic estimate.
+; The payload is >1 GB â€” allow room and show a realistic estimate.
 DiskSpanning=no
 LicenseFile=..\packaging\licenses\NOTICE.txt
 
@@ -172,8 +172,8 @@ begin
   ModelsDir := DataDir + '\models';
   HfDir := DataDir + '\hf';
 
-  { transcripts.db + config are the user's data — never delete them.
-    Models are big and re-downloadable — offer to remove. Silent uninstall
+  { transcripts.db + config are the user's data â€” never delete them.
+    Models are big and re-downloadable â€” offer to remove. Silent uninstall
     (e.g. winget) keeps everything. }
   if not UninstallSilent then
   begin

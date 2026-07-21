@@ -15,8 +15,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..config import save_settings
 
-_MODELS = ["tiny.en", "base.en", "small.en", "medium", "large-v3"]
-
 
 def _input_devices() -> List[dict]:
     """Microphones, for the 'caption what I say' picker. Never raises: a machine
@@ -80,7 +78,6 @@ class SettingsWindow(QtWidgets.QWidget):
             root.addWidget(self._transport_group())
 
         self._tabs = QtWidgets.QTabWidget()
-        self._tabs.addTab(self._scrollable(self._tab([self._features_group()])), "Captions")
         self._tabs.addTab(self._scrollable(self._tab([self._audio_group()])), "Audio")
         from .transcripts import TranscriptsTab
         self._tabs.addTab(TranscriptsTab(settings), "Transcripts")
@@ -556,69 +553,74 @@ class SettingsWindow(QtWidgets.QWidget):
             self._overlay.reset_position()
 
     # ---- features (restart to apply) ----
-    def _features_group(self) -> QtWidgets.QGroupBox:
-        g = QtWidgets.QGroupBox("Speech recognition")
-        form = QtWidgets.QFormLayout(g)
-
-        self._colors = QtWidgets.QCheckBox("Colour captions by speaker (live diarization)")
-        self._colors.setChecked(bool(getattr(self._settings, "speaker_colors", False)))
-        self._colors.toggled.connect(self._on_speaker_colors)
-        form.addRow(self._colors)
-
-        self._model = QtWidgets.QComboBox()
-        self._model.addItems(_MODELS)
-        cur = getattr(self._settings, "model_name", "medium")
-        if cur in _MODELS:
-            self._model.setCurrentText(cur)
-        elif cur:
-            self._model.addItem(cur)
-            self._model.setCurrentText(cur)
-        self._model.currentTextChanged.connect(self._on_model)
-        form.addRow("Model:", self._model)
-        hint = QtWidgets.QLabel("Smaller models start faster and use less; larger are more accurate.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray; font-size: 11px;")
-        form.addRow(hint)
-        return g
-
-    def _on_speaker_colors(self, on: bool) -> None:
-        self._persist(speaker_colors=on)
-        self._apply_pipeline("speaker colours")
-
-    def _on_model(self, name: str) -> None:
-        self._persist(model_name=name)
-        self._apply_pipeline("model")
-
     # ---- updates (upgrade the app; models/transcripts are kept) ----
     def _updates_group(self) -> QtWidgets.QGroupBox:
         from .. import updater
         g = QtWidgets.QGroupBox("Updates")
         v = QtWidgets.QVBoxLayout(g)
+        self._pending_plan = None            # set when a check finds an update
+
         row = QtWidgets.QHBoxLayout()
         self._ver = QtWidgets.QLabel(f"Version {updater.current_version()}")
         row.addWidget(self._ver)
         row.addStretch(1)
         self._check_btn = QtWidgets.QPushButton("Check for updates")
-        self._check_btn.clicked.connect(self._check_updates)
+        self._check_btn.clicked.connect(lambda: self._check_updates(interactive=True))
         row.addWidget(self._check_btn)
         v.addLayout(row)
-        note = QtWidgets.QLabel("Updating replaces the app and keeps your models and transcripts "
-                                "(no big re-download).")
+
+        # Appears only once a check has found an update, so the newer version is one
+        # click away without re-checking.
+        self._install_btn = QtWidgets.QPushButton()
+        self._install_btn.setVisible(False)
+        self._install_btn.clicked.connect(self._install_pending)
+        v.addWidget(self._install_btn)
+
+        self._auto_check = QtWidgets.QCheckBox("Check for updates when Live Captions starts")
+        self._auto_check.setChecked(bool(getattr(self._settings, "check_updates_on_launch", True)))
+        self._auto_check.toggled.connect(lambda on: self._persist(check_updates_on_launch=on))
+        v.addWidget(self._auto_check)
+
+        self._auto_install = QtWidgets.QCheckBox("Install updates automatically")
+        self._auto_install.setChecked(bool(getattr(self._settings, "auto_install_updates", False)))
+        self._auto_install.toggled.connect(lambda on: self._persist(auto_install_updates=on))
+        v.addWidget(self._auto_install)
+
+        note = QtWidgets.QLabel(
+            "Off, you're told when an update is available and choose when to install "
+            "it. Updating replaces the app and keeps your models and transcripts.")
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
         v.addWidget(note)
+
+        # A background check on open (installed app only) so the tab reflects reality
+        # without the user pressing anything. A source checkout never phones home.
+        if getattr(sys, "frozen", False) and getattr(self._settings, "check_updates_on_launch", True):
+            QtCore.QTimer.singleShot(400, lambda: self._check_updates(interactive=False))
         return g
 
-    def _check_updates(self) -> None:
+    def show_available_update(self, plan: dict) -> None:
+        """Reflect an update the overlay's launch check already found, so an open
+        Settings window shows it without checking again."""
+        if not plan or not plan.get("url") or not hasattr(self, "_install_btn"):
+            return
+        from .. import updater
+        self._pending_plan = plan
+        self._ver.setText(f"Update available: {plan['tag']}  "
+                          f"(you have {updater.current_version()})")
+        self._install_btn.setText(f"Install {plan['tag']} now  (~{plan['approx_mb']} MB)")
+        self._install_btn.setVisible(True)
+
+    def _check_updates(self, interactive: bool = True) -> None:
         import threading
         from .. import updater
-        self._check_btn.setEnabled(False)
-        self._ver.setText("Checking for updates…")
+        self._check_interactive = interactive
+        if interactive:
+            self._check_btn.setEnabled(False)
+            self._ver.setText("Checking for updates…")
 
         def _work():
             try:
-                # resolve_update() picks the smallest safe download: a small patch
-                # when the heavy libraries are unchanged, else the full installer.
                 plan = updater.resolve_update()
                 self._check_done.emit({"plan": plan, "err": None})
             except Exception as e:
@@ -629,27 +631,48 @@ class SettingsWindow(QtWidgets.QWidget):
         from .. import updater
         self._check_btn.setEnabled(True)
         if res["err"]:
-            self._ver.setText(f"Couldn't check for updates ({res['err']})")
+            # A silent background check must not nag with an error dialog; only the
+            # explicit "Check" button surfaces the failure.
+            if getattr(self, "_check_interactive", True):
+                self._ver.setText(f"Couldn't check for updates ({res['err']})")
             return
         plan = res["plan"]
         if not plan or not plan.get("url"):
+            self._pending_plan = None
+            self._install_btn.setVisible(False)
             self._ver.setText(f"Up to date (version {updater.current_version()})")
             return
+
+        self._pending_plan = plan
         tag = plan["tag"]
-        # Say how big the download is, and — when it's the small one — why.
+        self._ver.setText(f"Update available: {tag}  (you have {updater.current_version()})")
+        self._install_btn.setText(f"Install {tag} now  (~{plan['approx_mb']} MB)")
+        self._install_btn.setVisible(True)
+
+        # A background check just surfaces the update (label + button). Auto-install
+        # happens once at launch, in run_overlay, so it can't fire twice. Only an
+        # explicit "Check" click offers to install right away.
+        if getattr(self, "_check_interactive", True):
+            self._install_pending(confirm=True)
+
+    def _install_pending(self, confirm: bool = True) -> None:
+        plan = self._pending_plan
+        if not plan:
+            return
+        tag = plan["tag"]
         size = (f"a small update (~{plan['approx_mb']} MB — the speech libraries "
                 f"haven't changed, so only the app is downloaded)"
                 if plan["kind"] == "patch"
                 else f"the full installer (~{plan['approx_mb']} MB)")
-        ans = QtWidgets.QMessageBox.question(
-            self, "Update available",
-            f"Version {tag} is available (you have {updater.current_version()}).\n\n"
-            f"This is {size}. Your models and transcripts are kept, and Live Captions "
-            f"will close to finish installing.\n\nDownload and install it now?")
-        if ans == QtWidgets.QMessageBox.StandardButton.Yes:
-            self._start_download(plan["url"], tag)
-        else:
-            self._ver.setText(f"Update {tag} available")
+        if confirm:
+            ans = QtWidgets.QMessageBox.question(
+                self, "Install update",
+                f"Version {tag} is ready to install. This is {size}. Your models and "
+                f"transcripts are kept, and Live Captions will close to finish "
+                f"installing.\n\nInstall it now?")
+            if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        self._start_download(plan["url"], tag)
 
     def _start_download(self, url: str, tag: str) -> None:
         import threading

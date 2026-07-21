@@ -30,6 +30,7 @@ _MOD_ALIASES = {"control": "ctrl", "super": "win", "windows": "win", "meta": "wi
 
 # ct2 compute types that actually exist. Anything else fails at model-load time
 # with a message most people can't act on, so don't let it be typed.
+_MODELS = ["tiny.en", "base.en", "small.en", "medium", "large-v3"]
 _GPU_COMPUTE = ["float16", "int8_float16", "bfloat16", "float32"]
 _CPU_COMPUTE = ["int8", "int8_float32", "float32", "bfloat16"]
 
@@ -289,6 +290,25 @@ class AdvancedTab(QtWidgets.QWidget):
     def _recognition_group(self) -> QtWidgets.QGroupBox:
         g = QtWidgets.QGroupBox("Recognition")
         form = QtWidgets.QFormLayout(g)
+
+        # The speech model lived on the old Captions tab; it belongs with the other
+        # recognition settings. Changing it rebuilds the pipeline (and downloads the
+        # weights the first time), so it goes through the same restart path.
+        self._model = QtWidgets.QComboBox()
+        self._model.addItems(_MODELS)
+        cur_model = str(getattr(self._settings, "model_name", "medium") or "medium")
+        if cur_model in _MODELS:
+            self._model.setCurrentText(cur_model)
+        else:
+            self._model.addItem(cur_model)
+            self._model.setCurrentText(cur_model)
+        self._model.currentTextChanged.connect(
+            lambda t: self._persist_and_rebuild("model", model_name=t))
+        form.addRow("Model:", self._model)
+        form.addRow(_hint(
+            "Smaller models (tiny.en, base.en) start faster and use less; larger "
+            "(medium, large-v3) are more accurate but slower. The first use of a new "
+            "model downloads its weights."))
 
         self._lang = QtWidgets.QComboBox()
         self._lang.setEditable(True)

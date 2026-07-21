@@ -390,6 +390,33 @@ def should_start_on_launch(settings) -> bool:
     return last not in ("paused", "stopped")
 
 
+class _UpdateWatcher(QtCore.QObject):
+    """Runs the update check and download off the GUI thread, marshalling results
+    back via signals. Kept tiny: the decision of WHAT to download lives in
+    updater.resolve_update(); this just moves the work off the event loop."""
+    found = QtCore.Signal(object)       # plan dict, or None
+    installed = QtCore.Signal(str)      # downloaded installer path
+    failed = QtCore.Signal(str)
+
+    def check(self) -> None:
+        def work():
+            try:
+                from .. import updater
+                self.found.emit(updater.resolve_update())
+            except Exception:
+                self.found.emit(None)   # a failed launch check is silent, never a nag
+        threading.Thread(target=work, daemon=True).start()
+
+    def install(self, url: str) -> None:
+        def work():
+            try:
+                from .. import updater
+                self.installed.emit(updater.download(url))
+            except Exception as e:
+                self.failed.emit(str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+
 class Transport(QtCore.QObject):
     """Start / pause / stop the capture+ASR pipeline without quitting the app.
 
@@ -667,6 +694,36 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
     # On launch, make the app discoverable: a tray notification (so you know it's
     # running and where Settings is) and, by default, open the Settings window so
     # the GUI is front-and-centre instead of hidden behind a tray right-click.
+    # --- update check on launch: notify, and auto-install only if opted in ---
+    updates = _UpdateWatcher()
+
+    def _on_update_found(plan) -> None:
+        if not plan or not plan.get("url"):
+            return
+        tag = plan["tag"]
+        if tray is not None:
+            tray.showMessage(
+                "Live Captions",
+                f"Update available: {tag} (~{plan['approx_mb']} MB). "
+                f"Open Settings → Updates to install.",
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information, 8000)
+        w = settings_win.get("w")
+        if w is not None:
+            w.show_available_update(plan)      # reflect it if Settings is already open
+        if getattr(settings, "auto_install_updates", False):
+            if tray is not None:
+                tray.showMessage("Live Captions", f"Downloading {tag}…",
+                                 QtWidgets.QSystemTrayIcon.MessageIcon.Information, 5000)
+            updates.install(plan["url"])
+
+    def _on_update_installed(path: str) -> None:
+        from .. import updater
+        updater.run_installer(path)            # closes+replaces us, relaunches
+        app.quit()
+
+    updates.found.connect(_on_update_found)
+    updates.installed.connect(_on_update_installed)
+
     def _on_launch():
         if tray is not None:
             tray.showMessage(
@@ -675,6 +732,9 @@ def run_overlay(source_factory: Callable[[], object], settings, *, source_name: 
                 QtWidgets.QSystemTrayIcon.MessageIcon.Information, 6000)
         if getattr(settings, "open_settings_on_launch", True):
             _open_settings()
+        # Only the installed app updates itself; a source checkout never phones home.
+        if getattr(sys, "frozen", False) and getattr(settings, "check_updates_on_launch", True):
+            updates.check()
     QtCore.QTimer.singleShot(300, _on_launch)   # after the loop starts, so overlay/tray render first
 
     # let the interpreter process Ctrl+C while the Qt loop runs

@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     overlay_text_color: str = "#FFFFFF"   # base caption colour (speakers override when coloured)
     speaker_colors: bool = False          # colour captions by speaker (turns on live diarization)
     open_settings_on_launch: bool = True  # show the Settings window when the app starts
+    # Updates. Check on launch (just tells you what's available), but never install
+    # without asking unless auto_install is explicitly turned on — a surprise
+    # gigabyte download and a restart is not something to do behind the user's back.
+    check_updates_on_launch: bool = True
+    auto_install_updates: bool = False
     overlay_movable: bool = False         # draggable (vs click-through); remembered across launches
     # Pin the caption pill to an exact size. 0 = size to fit the text, which makes
     # the pill change width line by line — steadier to read alongside a video when
