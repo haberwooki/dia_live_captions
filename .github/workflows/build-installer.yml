@@ -65,9 +65,15 @@ jobs:
           path: Output/LiveCaptions-Setup-*.exe
           if-no-files-found: error
 
-      - name: Attach installer to the release (tag builds only)
+      - name: Attach installer, patch and manifest to the release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: Output/LiveCaptions-Setup-*.exe
+          # The patch installer and manifest.json drive differential updates: an
+          # installed app compares its internal.sha256 to the manifest and downloads
+          # only the small patch when the native libraries are unchanged.
+          files: |
+            Output/LiveCaptions-Setup-*.exe
+            Output/LiveCaptions-Patch-*.exe
+            Output/manifest.json
           fail_on_unmatched_files: true

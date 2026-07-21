@@ -617,10 +617,12 @@ class SettingsWindow(QtWidgets.QWidget):
 
         def _work():
             try:
-                tag, url = updater.latest_release()
-                self._check_done.emit({"tag": tag, "url": url, "err": None})
+                # resolve_update() picks the smallest safe download: a small patch
+                # when the heavy libraries are unchanged, else the full installer.
+                plan = updater.resolve_update()
+                self._check_done.emit({"plan": plan, "err": None})
             except Exception as e:
-                self._check_done.emit({"tag": None, "url": None, "err": type(e).__name__})
+                self._check_done.emit({"plan": None, "err": type(e).__name__})
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_check_done(self, res: dict) -> None:
@@ -629,17 +631,23 @@ class SettingsWindow(QtWidgets.QWidget):
         if res["err"]:
             self._ver.setText(f"Couldn't check for updates ({res['err']})")
             return
-        tag, url = res["tag"], res["url"]
-        if not url or not updater.is_newer(tag):
+        plan = res["plan"]
+        if not plan or not plan.get("url"):
             self._ver.setText(f"Up to date (version {updater.current_version()})")
             return
+        tag = plan["tag"]
+        # Say how big the download is, and — when it's the small one — why.
+        size = (f"a small update (~{plan['approx_mb']} MB — the speech libraries "
+                f"haven't changed, so only the app is downloaded)"
+                if plan["kind"] == "patch"
+                else f"the full installer (~{plan['approx_mb']} MB)")
         ans = QtWidgets.QMessageBox.question(
             self, "Update available",
             f"Version {tag} is available (you have {updater.current_version()}).\n\n"
-            f"Download and install it now? Your models and transcripts are kept, and "
-            f"Live Captions will close to finish installing.")
+            f"This is {size}. Your models and transcripts are kept, and Live Captions "
+            f"will close to finish installing.\n\nDownload and install it now?")
         if ans == QtWidgets.QMessageBox.StandardButton.Yes:
-            self._start_download(url, tag)
+            self._start_download(plan["url"], tag)
         else:
             self._ver.setText(f"Update {tag} available")
 

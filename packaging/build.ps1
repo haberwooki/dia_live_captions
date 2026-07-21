@@ -58,10 +58,29 @@ if (-not (Test-Path "packaging\vc_redist.x64.exe")) {
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if (-not $iscc) { throw "iscc.exe not on PATH — install Inno Setup 6.3 or newer (x64os needs 6.3+)" }
-& $iscc.Source packaging\livecaptions.iss
-if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed (need 6.3+? the .iss uses x64os)" }
+# The build version, read from the package, drives the patch payload + manifest.
+$ver = (Select-String -Path "src\livecaptions\__init__.py" -Pattern '__version__\s*=\s*"([^"]+)"').Matches.Groups[1].Value
 
-# OutputDir=..\Output in the .iss lands the installer at repo\Output.
-$setup = Get-ChildItem "Output\LiveCaptions-Setup-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($setup) { Write-Host ("Installer: {0}" -f $setup.FullName) -ForegroundColor Green }
+# Differential update prep: hash _internal (into the bundle), stage the patch payload
+# (just the exes + that hash), and write Output\manifest.json. Must run BEFORE the
+# installers compile so internal.sha256 ships inside BOTH of them.
+Write-Host "== 3/4  Differential update payload ==" -ForegroundColor Cyan
+$staging = "dist\LiveCaptions-patch"
+python packaging\make_patch.py "dist\LiveCaptions" $staging "Output" $ver
+if ($LASTEXITCODE -ne 0) { throw "make_patch.py failed" }
+
+Write-Host "== 4/4  Inno Setup installers (full + patch) ==" -ForegroundColor Cyan
+& $iscc.Source packaging\livecaptions.iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed (full)" }
+# Same .iss, PatchBuild define + the staged SourceDir: a small in-place upgrade
+# that carries only the exes. Only offered by the updater when the _internal hash
+# proves the libraries match; a fresh install always uses the full installer.
+& $iscc.Source "/DPatchBuild" "/DSourceDir=..\dist\LiveCaptions-patch" packaging\livecaptions.iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed (patch)" }
+
+# OutputDir=..\Output in the .iss lands the installers at repo\Output.
+foreach ($pat in @("LiveCaptions-Setup-*.exe", "LiveCaptions-Patch-*.exe")) {
+    $f = Get-ChildItem "Output\$pat" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { Write-Host ("  {0}  ({1:N0} MB)" -f $f.Name, ($f.Length/1MB)) -ForegroundColor Green }
+}
 Write-Host "Done." -ForegroundColor Cyan

@@ -12,11 +12,15 @@
 ;    anything outside our own %LOCALAPPDATA%\live-captions tree.
 
 #define AppName "Live Captions"
-#define AppVersion "0.4.1"
+#define AppVersion "0.4.2"
 #define AppPublisher "live-captions"
 #define AppExeCli "livecaptions.exe"
 #define AppExeGui "livecaptions-overlay.exe"
-#define SourceDir "..\dist\LiveCaptions"
+; The patch build overrides this with /DSourceDir=..\dist\LiveCaptions-patch, so
+; only define it when the command line didn't.
+#ifndef SourceDir
+  #define SourceDir "..\dist\LiveCaptions"
+#endif
 
 [Setup]
 ; A stable AppId keeps upgrades in place across versions. Keep this GUID fixed.
@@ -38,7 +42,17 @@ MinVersion=10.0
 CloseApplications=yes
 RestartApplications=no
 OutputDir=..\Output
+; PATCH build: same AppId, so it upgrades an existing install in place — but its
+; SourceDir holds ONLY the two exes (+ internal.sha256), not the ~800 MB _internal
+; tree. Inno's uninstall log is cumulative across same-AppId installs, so the
+; _internal files the FULL installer logged stay tracked and are still removed on
+; uninstall. Only offered by the updater when internal.sha256 proves the libraries
+; are unchanged; a fresh install always uses the full installer.
+#ifdef PatchBuild
+OutputBaseFilename=LiveCaptions-Patch-{#AppVersion}
+#else
 OutputBaseFilename=LiveCaptions-Setup-{#AppVersion}
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -58,10 +72,13 @@ Name: "addtopath"; Description: "Add the &command-line tool (livecaptions) to PA
 ; The whole PyInstaller --onedir output. ignoreversion on everything so a native
 ; DLL DOWNGRADE across versions still overwrites (Inno keeps same/newer by default).
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifndef PatchBuild
 ; Visual C++ runtime: ctranslate2.dll / onnxruntime.dll statically import
 ; msvcp140 / vcruntime140; installing it removes a whole class of "missing DLL"
 ; failures on a fresh box. Place vc_redist.x64.exe next to this .iss before compiling.
+; A patch only runs over an existing full install, where the runtime is already in.
 Source: "vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+#endif
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeGui}"
@@ -70,7 +87,9 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeGui}"; Tasks: desktopicon
 
 [Run]
+#ifndef PatchBuild
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ runtime..."; Flags: waituntilterminated
+#endif
 Filename: "{app}\{#AppExeGui}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 ; The in-app updater installs silently and passes /RELAUNCH=1 so the app comes
 ; back up on its own. A plain silent install (winget, scripted) must NOT launch.

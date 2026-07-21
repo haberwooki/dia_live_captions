@@ -85,3 +85,76 @@ class TestIsNewer:
     def test_v_prefix_is_optional(self, monkeypatch):
         monkeypatch.setattr(U, "__version__", "0.3.2")
         assert U.is_newer("0.4.0") is True
+
+
+class TestDifferentialPlan:
+    """A patch (small download) is chosen ONLY when the heavy native libraries are
+    provably unchanged. Every unproven case falls back to the full installer, so a
+    mismatched patch — new exes against old libraries — can never be applied.
+    """
+
+    def _release(self, tag="v0.5.0", *, patch=True, manifest_hash="abc"):
+        assets = [{"name": f"LiveCaptions-Setup-{tag.lstrip('v')}.exe",
+                   "browser_download_url": f"https://ex/{tag}/full.exe"}]
+        if patch:
+            assets.append({"name": f"LiveCaptions-Patch-{tag.lstrip('v')}.exe",
+                           "browser_download_url": f"https://ex/{tag}/patch.exe"})
+        if manifest_hash is not None:
+            assets.append({"name": "manifest.json",
+                           "browser_download_url": f"https://ex/{tag}/manifest.json"})
+        self._manifest = {"internal_sha256": manifest_hash} if manifest_hash else {}
+        return {"tag_name": tag, "assets": assets}
+
+    def _patch_manifest(self, monkeypatch):
+        import io
+        import json as _json
+
+        class R(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        monkeypatch.setattr(U.urllib.request, "urlopen",
+                            lambda req, timeout=10: R(_json.dumps(self._manifest).encode()))
+
+    def test_matching_hash_chooses_the_patch(self, monkeypatch):
+        rel = self._release(manifest_hash="deadbeef")
+        self._patch_manifest(monkeypatch)
+        plan = U.plan_update(rel, local_hash="deadbeef")
+        assert plan["kind"] == "patch"
+        assert plan["url"].endswith("patch.exe")
+        assert plan["approx_mb"] < 940
+
+    def test_mismatched_hash_falls_back_to_full(self, monkeypatch):
+        """The native libraries changed: a patch would pair new exes with old libs."""
+        rel = self._release(manifest_hash="NEW-libs")
+        self._patch_manifest(monkeypatch)
+        plan = U.plan_update(rel, local_hash="OLD-libs")
+        assert plan["kind"] == "full"
+        assert plan["url"].endswith("full.exe")
+
+    def test_unknown_local_hash_falls_back_to_full(self, monkeypatch):
+        """A dev run or an install predating the hash file: never risk a patch."""
+        rel = self._release(manifest_hash="abc")
+        self._patch_manifest(monkeypatch)
+        assert U.plan_update(rel, local_hash=None)["kind"] == "full"
+
+    def test_no_patch_asset_falls_back_to_full(self, monkeypatch):
+        rel = self._release(patch=False, manifest_hash="abc")
+        self._patch_manifest(monkeypatch)
+        assert U.plan_update(rel, local_hash="abc")["kind"] == "full"
+
+    def test_no_manifest_falls_back_to_full(self):
+        """No manifest means no way to prove the libraries match — download it all."""
+        rel = self._release(manifest_hash=None)
+        assert U.plan_update(rel, local_hash="abc")["kind"] == "full"
+
+    def test_a_broken_manifest_download_falls_back_to_full(self, monkeypatch):
+        rel = self._release(manifest_hash="abc")
+        def boom(req, timeout=10):
+            raise OSError("network died mid-check")
+        monkeypatch.setattr(U.urllib.request, "urlopen", boom)
+        assert U.plan_update(rel, local_hash="abc")["kind"] == "full"
+
+    def test_local_hash_is_none_off_a_frozen_build(self, monkeypatch):
+        """In a normal (unfrozen) run there is no install dir; must not read one."""
+        monkeypatch.setattr(U.sys, "frozen", False, raising=False)
+        assert U.local_internal_hash() is None

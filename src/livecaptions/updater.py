@@ -10,11 +10,18 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import urllib.request
 from typing import Callable, Optional, Tuple
 
 from . import __version__
+
+#: Written into the install dir by the build, holding a hash of the _internal
+#: tree (torch, NeMo, cuBLAS — ~800 MB, the stable bulk). When this matches the
+#: latest release's, the heavy libraries did not change and only the small "patch"
+#: installer (the two exes) is needed — most of a point release's download avoided.
+INTERNAL_HASH_FILE = "internal.sha256"
 
 REPO = "haberwooki/dia_live_captions"
 # The LIST, not /releases/latest. GitHub's "latest" pointer follows PUBLISH time,
@@ -69,6 +76,80 @@ def is_newer(tag: str) -> bool:
         return _tuple(tag) > _tuple(__version__)
     except Exception:
         return False
+
+
+# --- differential update: skip the ~800 MB of unchanged native libraries -------
+
+def _highest_release(timeout: float) -> Optional[dict]:
+    """The full JSON of the highest-version release that has an installer."""
+    req = urllib.request.Request(_API, headers={
+        "Accept": "application/vnd.github+json", "User-Agent": "livecaptions-updater"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        releases = json.load(r)
+    best, best_ver = None, ()
+    for rel in releases:
+        if rel.get("draft") or rel.get("prerelease") or not _installer_url(rel):
+            continue
+        ver = _tuple(rel.get("tag_name", ""))
+        if ver > best_ver:
+            best, best_ver = rel, ver
+    return best
+
+
+def _asset(release: dict, predicate) -> Optional[str]:
+    return next((a["browser_download_url"] for a in release.get("assets", [])
+                 if predicate(a.get("name", "").lower())), None)
+
+
+def local_internal_hash() -> Optional[str]:
+    """The installed native-library hash, or None if unknown (dev run, old
+    install, missing file). None simply forces the safe full download."""
+    if not getattr(sys, "frozen", False):
+        return None
+    path = os.path.join(os.path.dirname(sys.executable), INTERNAL_HASH_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def plan_update(release: dict, local_hash: Optional[str]) -> dict:
+    """Decide WHAT to download for `release`. Pure, so it can be tested exhaustively.
+
+    Returns {tag, kind, url, approx_mb}. kind is "patch" only when the release
+    ships a patch installer AND a manifest whose internal hash matches what is
+    installed — i.e. the heavy libraries are provably identical. Anything unproven
+    (no manifest, no patch, hash mismatch, unknown local hash) falls back to the
+    full installer. A wrong patch can therefore never be chosen.
+    """
+    tag = release.get("tag_name", "")
+    full = _installer_url(release)
+    patch = _asset(release, lambda n: "patch" in n and n.endswith(".exe"))
+    manifest_url = _asset(release, lambda n: n == "manifest.json")
+
+    remote_hash = None
+    if manifest_url:
+        try:
+            req = urllib.request.Request(manifest_url, headers={
+                "User-Agent": "livecaptions-updater"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                remote_hash = (json.load(r) or {}).get("internal_sha256")
+        except Exception:
+            remote_hash = None
+
+    if patch and local_hash and remote_hash and local_hash == remote_hash:
+        return {"tag": tag, "kind": "patch", "url": patch, "approx_mb": 200}
+    return {"tag": tag, "kind": "full", "url": full, "approx_mb": 940}
+
+
+def resolve_update(timeout: float = 10.0) -> Optional[dict]:
+    """The update to offer, or None if there is no newer release. Chooses the
+    smallest safe download. Raises on network error, like latest_release()."""
+    release = _highest_release(timeout)
+    if release is None or not is_newer(release.get("tag_name", "")):
+        return None
+    return plan_update(release, local_internal_hash())
 
 
 def download(url: str, on_progress: Optional[Callable[[float], None]] = None,
