@@ -1,4 +1,4 @@
-﻿; Inno Setup 6.3+ installer for live-captions.
+; Inno Setup 6.3+ installer for live-captions.
 ; (6.3 is required: ArchitecturesAllowed=x64os below was renamed from "x64" in 6.3.)
 ; Build the PyInstaller bundle first (packaging/livecaptions.spec -> dist/LiveCaptions),
 ; then compile this with ISCC:  iscc packaging\livecaptions.iss
